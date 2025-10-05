@@ -1,0 +1,66 @@
+{
+  "manifest_version": 3,
+  "name": "OTMenT",
+  "version": "1.0.2",
+  "description": "Automate address lookups, solve captchas via 2Captcha, and push results into Google Sheets.",
+  "permissions": [
+    "scripting",
+    "storage",
+    "contextMenus",
+    "webRequest",
+    "tabs",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://www.fastpeoplesearch.com/*",
+    "https://*.fastpeoplesearch.com/*",
+    "https://challenges.cloudflare.com/*",
+    "https://*.challenges.cloudflare.com/*",
+    "https://www.google.com/recaptcha/*",
+    "https://2captcha.com/*",
+    "https://api.2captcha.com/*",
+    "https://oauth2.googleapis.com/*",
+    "https://sheets.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.fastpeoplesearch.com/*",
+        "https://*.fastpeoplesearch.com/*",
+        "https://challenges.cloudflare.com/*",
+        "https://*.challenges.cloudflare.com/*",
+        "https://www.google.com/recaptcha/*"
+      ],
+      "js": [
+        "solver.detector.content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_title": "OTMenT"
+  },
+  "options_page": "options.html",
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "crypto-worker.js",
+        "crypto-utils.js",
+        "hook-turnstile.js"
+      ],
+      "matches": [
+        "https://www.fastpeoplesearch.com/*",
+        "https://challenges.cloudflare.com/*",
+        "https://*.challenges.cloudflare.com/*"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://2captcha.com https://api.2captcha.com https://challenges.cloudflare.com https://*.challenges.cloudflare.com https://www.google.com/recaptcha/ https://oauth2.googleapis.com https://sheets.googleapis.com https://www.fastpeoplesearch.com"
+  }
+}

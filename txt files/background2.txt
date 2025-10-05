@@ -1,0 +1,1967 @@
+// background.js
+// Chrome MV3 service worker ("type": "module" in manifest.json")
+// @ts-nocheck
+// --- 2Captcha solver integration ---
+import './solver.worker.js';
+
+import {
+  importKeyFromPem,
+  signRS256,
+  sha256Hex,
+} from './crypto-utils.js';
+import { genSigningKey } from './crypto-utils.js';
+
+/** ── Retry globals (define once, safe across hot-reloads) ───────────────── */
+if (!globalThis.urlRetries) globalThis.urlRetries = new Map();
+if (!globalThis.rateLimitRetries) globalThis.rateLimitRetries = new Map();
+
+// Use a safe default until config is loaded later
+if (typeof globalThis.MAX_TOTAL_RETRIES !== 'number') {
+  globalThis.MAX_TOTAL_RETRIES = 5; // fallback default
+}
+
+// Convenience aliases (avoid const/let redeclare errors on hot reloads)
+/* eslint-disable no-var */
+var urlRetries = globalThis.urlRetries;
+var rateLimitRetries = globalThis.rateLimitRetries;
+var MAX_TOTAL_RETRIES = globalThis.MAX_TOTAL_RETRIES;
+/* eslint-enable no-var */
+
+// ─────────────────────────────
+// GLOBAL REQUEST QUEUE WITH CAPTCHA + RETRY SUPPORT
+class RequestQueue {
+  constructor(concurrency = 3, baseDelay = 3000, maxRetries = 5) {
+    this.queue = [];
+    this.activeCount = 0;
+    this.concurrency = concurrency;
+    this.baseDelay = baseDelay;
+    this.dynamicDelay = baseDelay;
+    this.maxRetries = maxRetries;
+
+    this.paused = false;
+    this.pausedUntil = 0;
+    this._pumpRunning = false;
+  }
+
+  setDelay(ms) {
+    // Cap dynamic delay to 2 mins; never below baseDelay
+    this.dynamicDelay = Math.min(Math.max(ms, this.baseDelay), 120_000);
+  }
+
+  pause(reason = "Server busy", ms = this.dynamicDelay) {
+    const until = Date.now() + ms;
+    if (this.paused && until <= this.pausedUntil) return;
+
+    this.paused = true;
+    this.pausedUntil = Math.max(this.pausedUntil, until);
+    console.warn(`⏸ Queue paused: ${reason} — resume in ${this.pausedUntil - Date.now()}ms`);
+    this._pump();
+  }
+
+  async add(fn, opts = {}) {
+    return new Promise((resolve, reject) => {
+      if (typeof fn !== 'function') {
+        return reject(new Error('RequestQueue.add expects a function'));
+      }
+
+      this.queue.push({
+        fn,
+        resolve,
+        reject,
+        retries: opts.retries ?? 0,
+        site: opts.site ?? null,
+        url: opts.url ?? null
+      });
+
+      this._pump();
+    });
+  }
+
+  async _launchOne(item) {
+    this.activeCount++;
+
+    try {
+      const result = await item.fn();
+      item.resolve(result);
+    } catch (err) {
+      if (this._shouldRetry(err, item)) {
+        const backoff = this._getRetryDelay(item.retries);
+        console.warn(
+          `🔄 Retry ${item.retries + 1}/${this.maxRetries} for ${item.url || 'unknown URL'} after ${backoff}ms`
+        );
+        item.retries++;
+        await delay(backoff);
+        this.queue.push(item);
+      } else {
+        item.reject(err);
+      }
+    } finally {
+      this.activeCount--;
+    }
+  }
+
+  _shouldRetry(err, item) {
+    const msg = (err?.message || '').toLowerCase();
+    if (item.retries >= this.maxRetries) return false;
+
+    // Retry on network errors or server throttling
+    return (
+      msg.includes('timeout') ||
+      msg.includes('429') ||
+      msg.includes('captcha') ||
+      msg.includes('bot-check') ||
+      msg.includes('too many requests')
+    );
+  }
+
+  _getRetryDelay(retries) {
+    // Exponential backoff: baseDelay × 2^retries, max 2 minutes
+    return Math.min(this.baseDelay * Math.pow(2, retries), 120_000);
+  }
+
+  async _pump() {
+    if (this._pumpRunning) return;
+    this._pumpRunning = true;
+
+    try {
+      while (true) {
+        // Global cooldown
+        await maybeWaitForCooldown();
+
+        // Pause logic
+        if (this.paused) {
+          const waitMs = Math.max(0, this.pausedUntil - Date.now());
+          if (waitMs > 0) {
+            await delay(waitMs);
+            continue;
+          } else {
+            this.paused = false;
+            this.pausedUntil = 0;
+            console.log('▶ Queue resumed');
+          }
+        }
+
+        // Stop if nothing to do or concurrency full
+        if (this.activeCount >= this.concurrency || this.queue.length === 0) break;
+
+        // Launch next request
+        const item = this.queue.shift();
+        await this._launchOne(item);
+
+        // Avoid burst requests
+        await safeDelay(this.dynamicDelay);
+      }
+    } finally {
+      this._pumpRunning = false;
+      if (this.queue.length && !this._pumpRunning) {
+        setTimeout(() => this._pump(), 0);
+      }
+    }
+  }
+}
+
+const requestQueue = new RequestQueue(3, 3000, 5);
+
+//_____________________________________
+
+let rsaPrivateKey;
+let config;
+let serviceAccount;
+let keyPair = null;
+const seen = new Set();
+
+// --- globals & imports
+const cfChallengeMeta = new Map();
+
+// ─────────────────────────────────────────────
+// Cloudflare Turnstile + Rate-Limit Aware Network Tap
+// ─────────────────────────────────────────────
+let globalCooldownUntil = 0; // timestamp in ms
+
+// Helper: delay with Promise
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Helper: set global cooldown
+function setGlobalCooldown(ms, reason = "Unknown") {
+  const until = Date.now() + ms;
+  if (until > globalCooldownUntil) {
+    globalCooldownUntil = until;
+    console.warn(`⏸ Global cooldown triggered for ${ms}ms (${reason})`);
+  }
+}
+
+// Helper: wait if global cooldown is active
+async function maybeWaitForCooldown() {
+  const now = Date.now();
+  if (now < globalCooldownUntil) {
+    const waitMs = globalCooldownUntil - now;
+    console.log(`⏳ Waiting ${waitMs}ms due to active cooldown...`);
+    await delay(waitMs);
+  }
+}
+
+chrome.webRequest.onCompleted.addListener(
+  details => {
+    if (details.statusCode === 429) {
+      console.warn(`🚫 429 Too Many Requests detected on ${details.url}`);
+      // backoff the queue pacing; no explicit pause here to avoid double pause logs
+      requestQueue.setDelay(requestQueue.dynamicDelay * 2);
+      setGlobalCooldown(60_000, "Hit 429 rate-limit");
+      return;
+    }
+
+    if (details.responseHeaders) {
+      const retryAfter = details.responseHeaders.find(
+        h => h.name.toLowerCase() === 'retry-after'
+      );
+      if (retryAfter) {
+        const retryMs = isNaN(retryAfter.value)
+          ? 30_000
+          : Number(retryAfter.value) * 1000;
+
+        console.warn(`⏳ Server requested Retry-After: ${retryMs}ms`);
+        requestQueue.setDelay(Math.max(requestQueue.dynamicDelay, Math.min(retryMs, 60_000)));
+        setGlobalCooldown(retryMs, "Retry-After header");
+      }
+    }
+  },
+  { urls: ['<all_urls>'] },
+  ['responseHeaders']
+);
+
+// Attach listener for completed responses — detect 429s & Retry-After
+chrome.webRequest.onCompleted.addListener(
+  details => {
+    if (details.statusCode === 429) {
+      console.warn(`🚫 429 Too Many Requests detected on ${details.url}`);
+      setGlobalCooldown(60_000, "Hit 429 rate-limit");
+    }
+
+    // Check for Retry-After header (not always provided, but if it is, obey it)
+    if (details.responseHeaders) {
+      const retryAfter = details.responseHeaders.find(
+        h => h.name.toLowerCase() === 'retry-after'
+      );
+      if (retryAfter) {
+        const retryMs = isNaN(retryAfter.value)
+          ? 30_000 // fallback if non-numeric value
+          : Number(retryAfter.value) * 1000;
+
+        console.warn(`⏳ Server requested retry-after: ${retryMs}ms`);
+        setGlobalCooldown(retryMs, "Retry-After header");
+      }
+    }
+  },
+  { urls: ['<all_urls>'] },
+  ['responseHeaders']
+);
+
+// ─────────────────────────────────────────────
+// Message bridge for retrieving stored metadata
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.__solverGetTurnstileMeta) {
+    if (sender.tab && typeof sender.tab.id === 'number' && sender.tab.id >= 0) {
+      sendResponse(cfChallengeMeta.get(sender.tab.id) || null);
+    } else {
+      sendResponse(null);
+    }
+    return true;
+  }
+});
+
+// ─────────────────────────────────────────────
+// Export cooldown-aware delay function for scrapers
+async function safeDelay(ms) {
+  // First respect any global cooldown
+  await maybeWaitForCooldown();
+  // Then apply your normal per-request delay
+  await delay(ms);
+}
+
+
+// ─────────────────────────────
+// Fibonacci delay system (no repeats per session)
+let fibDelayPool = null;         // current pool
+const usedFibDelays = new Set(); // tracks all used delays globally
+
+/**
+ * Generate a Fibonacci sequence up to a maximum value.
+ * Each value is scaled by `scale` for finer control.
+ */
+function generateFibonacci(max, scale = 1) {
+  const fib = [1, 1];
+  while (true) {
+    const next = fib[fib.length - 1] + fib[fib.length - 2];
+    if (next * scale > max) break;
+    fib.push(next);
+  }
+  return fib.map(n => n * scale);
+}
+
+/**
+ * Initialize or reset the Fibonacci delay pool.
+ * Optionally shuffle to randomize order.
+ */
+function initFibDelayPool() {
+  const { max = 10000, scale = 1 } = config.requestOptions?.fibDelays || {};
+  fibDelayPool = generateFibonacci(max, scale);
+
+  // Shuffle for randomness
+  for (let i = fibDelayPool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [fibDelayPool[i], fibDelayPool[j]] = [fibDelayPool[j], fibDelayPool[i]];
+  }
+}
+
+/**
+ * Return a Fibonacci-based delay.
+ * Guarantees no repeats in the current session.
+ * Auto-resets the pool if exhausted, skipping already-used values.
+ */
+function getFibDelay() {
+  if (!fibDelayPool || fibDelayPool.length === 0) {
+    console.warn('Fibonacci pool exhausted, reinitializing...');
+    initFibDelayPool();
+  }
+
+  while (fibDelayPool.length) {
+    const delay = fibDelayPool.pop();
+    if (!usedFibDelays.has(delay)) {
+      usedFibDelays.add(delay);
+      return delay;
+    }
+  }
+
+  // All values in pool have been used; you can reset usedFibDelays if you want a new cycle
+  console.warn('All unique Fibonacci delays have been used, resetting session history...');
+  usedFibDelays.clear();
+  initFibDelayPool();
+  return getFibDelay(); // retry after reset
+}
+
+/**
+ * Manual reset of the Fibonacci delay pool and used delays.
+ */
+function resetFibDelayPool() {
+  fibDelayPool = null;
+  usedFibDelays.clear();
+}
+
+// ─────────────────────────────
+// Default error patterns
+const defaultErrorPatterns = {
+  noResults: ['no results found', 'nothing matched', 'no listings found'],
+  captcha: ['g-recaptcha', 'turnstile', 'captcha', 'bot-check'],
+  rateLimit: ['rate limit', 'too many requests', 'temporarily blocked']
+};
+
+// Global solver lock to avoid race conditions
+globalThis.solverLock = null;
+
+// Track retries per row
+const rowRetries = new Map();
+
+/**
+ * Pre-check if a URL will immediately hit a Cloudflare Turnstile or 429 wall.
+ * Uses cfChallengeMeta from background listener before even opening a tab.
+ */
+async function shouldSkipOrDelay(url) {
+  const meta = Array.from(cfChallengeMeta.values()).find(m => url.includes(m.ifUrl || ''));
+  if (!meta) return false;
+
+  // If Cloudflare has flagged us, back off before opening new tabs
+  if (meta.rayId) {
+    console.warn(`🌐 Pre-emptive backoff: CF RayID ${meta.rayId} detected for ${url}`);
+    await delay(120_000); // 2 minutes
+    return true;
+  }
+  return false;
+}
+
+
+async function handleTimeoutError(tabId, row, opts = {}) {
+  const { heartbeat = false, lastError = '', url = '' } = opts;
+  let text = '';
+
+  // Track retries per URL (generic retries)
+  let retries = 0;
+  if (url) {
+    retries = (urlRetries.get(url) || 0) + 1;
+    urlRetries.set(url, retries);
+  }
+
+  // Grab diagnostic text safely
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () =>
+        (document.body?.innerText || document.documentElement?.innerText || '').slice(0, 20000)
+    });
+    text = result || '';
+  } catch (err) {
+    console.warn(`[Row ${row}] Failed to grab page text:`, err);
+  }
+
+  const patterns = config?.errorPatterns || defaultErrorPatterns;
+  const noRe   = new RegExp(patterns.noResults.join('|'), 'i');
+  const capRe  = new RegExp(patterns.captcha.join('|'), 'i');
+  const rateRe = new RegExp(patterns.rateLimit.join('|'), 'i');
+
+  console.warn(`🧪 [Row ${row}] Error snapshot (first 5k chars):`, text.slice(0, 5000));
+
+  // 1) No results → skip
+  if (noRe.test(text)) {
+    console.warn(`⚪ [Row ${row}] detected NO_RESULTS – skipping`);
+    await chrome.tabs.remove(tabId).catch(() => {});
+    if (url) { urlRetries.delete(url); rateLimitRetries.delete(url); }
+    return 'skip';
+  }
+
+  // 2) Captcha / challenge → retry via solver lock
+  if (capRe.test(text)) {
+    console.warn(`🚧 [Row ${row}] CAPTCHA detected`);
+    ensureSolverLock();
+    return 'retry';
+  }
+
+  // 3) 429 / rate-limit → exponential backoff + global/site signaling
+  if (rateRe.test(text) || /(^|[^0-9])429([^0-9]|$)/.test(String(lastError))) {
+    const rl = (rateLimitRetries.get(url) || 0) + 1;
+    rateLimitRetries.set(url, rl);
+
+    // Exponential backoff: 30s → 60s → 120s → … (cap 5m)
+    const backoffMs = Math.min(30_000 * Math.pow(2, rl - 1), 300_000);
+
+    // Signal globally & pause queue briefly
+    setGlobalCooldown(Math.max(backoffMs, 60_000), "Hit 429 rate-limit");
+    if (typeof requestQueue?.pause === 'function') {
+      // Let the queue breathe while cooldown is in effect
+      requestQueue.setDelay(Math.min(Math.max(requestQueue.dynamicDelay * 2, 1500), 60000));
+      requestQueue.pause("HTTP 429 Too Many Requests");
+    }
+
+    console.warn(`🐌 [Row ${row}] RATE_LIMIT → waiting ${Math.round(backoffMs / 1000)}s then retry`);
+    await chrome.tabs.remove(tabId).catch(() => {});
+    await safeDelay(backoffMs); // respects global cooldown internally
+    return 'retry';
+  }
+
+  // 4) Selector timeout → Fibonacci backoff
+  if (lastError?.toLowerCase()?.includes('timeout waiting for any selector')) {
+    console.warn(`⏱ [Row ${row}] Selector timeout → Fibonacci backoff`);
+    ensureSolverLock();
+    await safeDelay(getFibDelay());
+    return 'retry';
+  }
+
+  // 5) Cloudflare / Turnstile metadata hints
+  const meta = cfChallengeMeta.get(tabId) || {};
+  if (meta.sitekey || meta.rayId) {
+    console.warn(`🚧 [Row ${row}] Likely CAPTCHA (sitekey=${meta.sitekey || 'n/a'}, rayId=${meta.rayId || 'n/a'})`);
+    ensureSolverLock();
+    return 'retry';
+  }
+
+  // 6) Empty body → slow retry
+  if (!text.trim()) {
+    console.warn(`🌫️ [Row ${row}] Empty body → retry after 30s`);
+    await safeDelay(30_000);
+    return 'retry';
+  }
+
+  // 7) Unclassified → bounded retries (generic)
+  if (retries < MAX_TOTAL_RETRIES) {
+    const wait = getFibDelay() * 2;
+    console.warn(`🔄 [Row ${row}] Unclassified timeout → retry ${retries}/${MAX_TOTAL_RETRIES} after ${wait}ms`);
+    await safeDelay(wait);
+    return 'retry';
+  }
+
+  // 8) Final give up
+  console.warn(`⚠️ [Row ${row}] Final timeout — skipping permanently`);
+  await chrome.tabs.remove(tabId).catch(() => {});
+  if (url) { urlRetries.delete(url); rateLimitRetries.delete(url); }
+  return 'skip';
+}
+
+// ─────────────────────────────
+// Ensure a single solverLock exists globally
+function ensureSolverLock() {
+  if (!globalThis.solverLock) {
+    let release;
+    globalThis.solverLock = new Promise(res => (release = res));
+    globalThis.solverLock.release = release;
+  }
+}
+
+
+function toColumnLetter(num) {
+  let s = '', n = num;
+  while (n > 0) {
+    let m = (n - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+// ─────────────────────────────
+// Levenshtein & similarity
+function levenshtein(a, b) {
+  const dp = Array(a.length + 1).fill().map(() => Array(b.length + 1).fill(0));
+  for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+function similarity(a, b) {
+  a = a.trim().toLowerCase();
+  b = b.trim().toLowerCase();
+  const maxLen = Math.max(a.length, b.length);
+  return maxLen ? 1 - levenshtein(a, b) / maxLen : 0;
+}
+
+// ─────────────────────────────
+// Normalize hrefs
+function normalizeHrefs(rawHrefs = [], baseUrl = '') {
+  if (!Array.isArray(rawHrefs)) return [];
+  const out = [];
+  for (const raw of rawHrefs) {
+    if (typeof raw !== 'string') continue;
+    const href = raw.trim();
+    if (!href) continue;
+    try {
+      const abs = new URL(href, baseUrl).href;
+      if (abs.startsWith('http')) out.push(abs);
+    } catch {
+      console.warn('Skipping invalid href:', href);
+    }
+  }
+  return out;
+}
+
+// Helper: wait until a tab reaches "complete" or timeout
+async function waitForTabComplete(tabId, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    let timeout;
+
+    // If tab is already complete, resolve instantly
+    chrome.tabs.get(tabId, tab => {
+      if (chrome.runtime.lastError) {
+        return reject(new Error(`Tab ${tabId} no longer exists`));
+      }
+      if (tab.status === "complete") {
+        return resolve();
+      }
+    });
+
+    function onUpdated(id, info) {
+      if (id === tabId && info.status === "complete") {
+        cleanup();
+        resolve();
+      }
+    }
+
+    function onRemoved(id) {
+      if (id === tabId) {
+        cleanup();
+        reject(new Error(`Tab ${tabId} was closed`));
+      }
+    }
+
+    function cleanup() {
+      clearTimeout(timeout);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+    }
+
+    // Attach listeners
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+
+    // Add timeout safeguard
+    timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timeout waiting for tab ${tabId} to complete`));
+    }, timeoutMs);
+  });
+}
+
+// helper: poll for any one of a list of selectors in a frame
+async function waitForAnySelector(tabId, selectors, timeout) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (sels, to) => {
+      return new Promise((resolve, reject) => {
+        let done = false;
+        const observers = [];
+        const timer = setTimeout(() => {
+          if (!done) {
+            done = true;
+            observers.forEach(mo => mo.disconnect());
+            reject(new Error(`Timeout waiting for selectors: ${sels.join(', ')}`));
+          }
+        }, to);
+
+        function checkAll() {
+          for (const sel of sels) {
+            if (document.querySelector(sel)) {
+              return sel;
+            }
+          }
+          return null;
+        }
+
+        const first = checkAll();
+        if (first) {
+          clearTimeout(timer);
+          resolve(first);
+          return;
+        }
+
+        for (const sel of sels) {
+          const mo = new MutationObserver(() => {
+            if (done) return;
+            const found = document.querySelector(sel);
+            if (found) {
+              done = true;
+              clearTimeout(timer);
+              observers.forEach(o => o.disconnect());
+              resolve(sel);
+            }
+          });
+          mo.observe(document, { childList: true, subtree: true });
+          observers.push(mo);
+        }
+      });
+    },
+    args: [selectors, timeout]
+  });
+
+  return result;
+}
+
+// ───────────────────────────────────────────────────────────
+// Follow detail links and scrape, with solver integration (robust + logging)
+async function followAndScrapeDetail(url, row) {
+  // Check max retries
+  const retries = urlRetries.get(url) || 0;
+  if (retries >= MAX_TOTAL_RETRIES) {
+    console.warn(`🛑 [Row ${row}] Giving up after ${MAX_TOTAL_RETRIES} retries for ${url}`);
+    return null;
+  }
+
+  const isTabAlive = async (id) => {
+    try { return !!(await chrome.tabs.get(id)); }
+    catch { return false; }
+  };
+
+  const safeRemoveTab = async (id) => {
+    if (!id) return;
+    try { await chrome.tabs.remove(id); } catch {}
+  };
+
+  const SELECTORS = [
+    '.list-results-header strong',
+    '.no-results-message',
+    '.error-message'
+  ];
+
+  // Normalize URL
+  if (!/^https?:\/\//i.test(url)) {
+    try { url = new URL(url, config.baseUrl).href; }
+    catch { throw new Error(`[row ${row}] Invalid detail URL: ${url}`); }
+  }
+
+  let tabId = null;
+  try {
+    // Backoff before opening new tab
+    await delay(getFibDelay());
+
+    // Create tab + attach logging
+    const created = await chrome.tabs.create({ url, active: false });
+    tabId = created?.id;
+    if (!tabId) throw new Error(`[row ${row}] Failed to create detail tab`);
+    attachCfNetworkLoggingForTab(tabId);
+
+    // STEP 1 — Wait for load (with timeout & retry if solver requests)
+    try {
+      await waitForTabComplete(tabId, 45_000);
+    } catch (e) {
+      if (!(await isTabAlive(tabId))) {
+        throw new Error(`[row ${row}] No tab with id: ${tabId}`);
+      }
+
+      // Retry logic on timeout
+      urlRetries.set(url, retries + 1);
+
+      const action = await handleTimeoutError(tabId, row, { 
+        url,
+        lastError: e?.message || 'waitForTabComplete timeout', 
+        heartbeat: true 
+      });
+
+      if (action === 'retry') {
+        console.warn(`[row ${row}] Retrying detail load after solver feedback [Attempt ${retries + 1}/${MAX_TOTAL_RETRIES}]`);
+        await waitForTabComplete(tabId, 120_000);
+      } else {
+        // NEW: capture partial HTML for debugging
+        const [{ result: htmlPreview }] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => document.documentElement.outerHTML.slice(0, 5000)
+        }).catch(() => [{ result: '' }]);
+
+        console.error(`[row ${row}] Skipped after load wait. Partial HTML:`, htmlPreview);
+        throw new Error(`[row ${row}] Detail solve skipped after load wait`);
+      }
+    }
+
+    // STEP 2 — Check for solver challenges like Cloudflare / hCaptcha
+    await delay(getFibDelay());
+
+    const flags = {
+      bodyText: false,
+      challengeForm: false,
+      cfVerify: false,
+      grecaptcha: false,
+      turnstileDiv: false,
+      challengeIframe: false
+    };
+
+    try {
+      const frameResults = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func: () => {
+          const text = document.body?.innerText || '';
+          const iframes = Array.from(document.querySelectorAll('iframe')).map(f => f.src || '');
+          return {
+            bodyText: /are you human\?/i.test(text),
+            challengeForm: !!document.querySelector('#challenge-form'),
+            cfVerify: !!document.querySelector('.cf-browser-verification'),
+            grecaptcha: !!document.querySelector('.g-recaptcha'),
+            turnstileDiv: !!document.querySelector('div[data-sitekey][class*="turnstile"]'),
+            challengeIframe: iframes.some(src =>
+              /challenges\.cloudflare\.com/i.test(src) ||
+              /\/cdn-cgi\/challenge-platform\//i.test(src)
+            )
+          };
+        }
+      });
+
+      for (const fr of frameResults) {
+        const f = fr?.result || {};
+        for (const key in flags) {
+          flags[key] ||= !!f[key];
+        }
+      }
+      console.log(`[row ${row}] Challenge detection:`, flags);
+    } catch (err) {
+      console.warn(`[row ${row}] Frame probe failed:`, err);
+    }
+
+    // Solver challenge detected → handle gracefully
+    if (Object.values(flags).some(Boolean)) {
+      urlRetries.set(url, retries + 1);
+      const action = await handleTimeoutError(tabId, row, { heartbeat: true });
+      if (action === 'retry') {
+        console.warn(`[row ${row}] Retrying due to solver challenge [Attempt ${retries + 1}/${MAX_TOTAL_RETRIES}]`);
+        await waitForTabComplete(tabId, 120_000);
+      } else {
+        throw new Error(`[row ${row}] Detail solve skipped (challenge unresolved)`);
+      }
+    }
+
+    // STEP 3 — Wait for core selectors (retryable)
+    await delay(getFibDelay());
+    if (!(await isTabAlive(tabId))) throw new Error(`[row ${row}] No tab with id: ${tabId}`);
+
+    let waitedSel;
+    try {
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (sels, timeout) => new Promise((resolve, reject) => {
+          let settled = false;
+          const observers = [];
+          const timer = setTimeout(() => {
+            if (!settled) {
+              settled = true;
+              observers.forEach(mo => mo.disconnect());
+              reject(new Error(`Timeout waiting for selectors: ${sels.join(', ')}`));
+            }
+          }, timeout);
+
+          for (const sel of sels) {
+            if (document.querySelector(sel)) {
+              settled = true;
+              clearTimeout(timer);
+              observers.forEach(mo => mo.disconnect());
+              resolve(sel);
+              return;
+            }
+          }
+
+          sels.forEach(sel => {
+            const mo = new MutationObserver(() => {
+              const el = document.querySelector(sel);
+              if (el && !settled) {
+                settled = true;
+                clearTimeout(timer);
+                observers.forEach(mo => mo.disconnect());
+                resolve(sel);
+              }
+            });
+            mo.observe(document, { childList: true, subtree: true });
+            observers.push(mo);
+          });
+        }),
+        args: [SELECTORS, 15_000]
+      });
+      waitedSel = result;
+    } catch (e) {
+      urlRetries.set(url, retries + 1);
+      const action = await handleTimeoutError(tabId, row, { lastError: e?.message || 'selector timeout' });
+      if (action === 'retry') {
+        console.warn(`[row ${row}] Retrying selector wait after solver feedback [Attempt ${retries + 1}/${MAX_TOTAL_RETRIES}]`);
+        await waitForTabComplete(tabId, 120_000);
+
+        // Attempt one final wait
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (sels, timeout) => new Promise((resolve, reject) => {
+            let settled = false;
+            const observers = [];
+            const timer = setTimeout(() => {
+              if (!settled) {
+                settled = true;
+                observers.forEach(mo => mo.disconnect());
+                reject(new Error(`Timeout waiting again for selectors: ${sels.join(', ')}`));
+              }
+            }, timeout);
+
+            for (const sel of sels) {
+              if (document.querySelector(sel)) {
+                settled = true;
+                clearTimeout(timer);
+                observers.forEach(mo => mo.disconnect());
+                resolve(sel);
+                return;
+              }
+            }
+            sels.forEach(sel => {
+              const mo = new MutationObserver(() => {
+                const el = document.querySelector(sel);
+                if (el && !settled) {
+                  settled = true;
+                  clearTimeout(timer);
+                  observers.forEach(mo => mo.disconnect());
+                  resolve(sel);
+                }
+              });
+              mo.observe(document, { childList: true, subtree: true });
+              observers.push(mo);
+            });
+          }),
+          args: [SELECTORS, 15_000]
+        });
+        waitedSel = result;
+      } else {
+        // Capture page snapshot before failing
+        const [{ result: htmlPreview }] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => document.documentElement.outerHTML.slice(0, 5000)
+        }).catch(() => [{ result: '' }]);
+
+        console.error(`[row ${row}] Selector wait failed. Partial HTML:`, htmlPreview);
+        throw e;
+      }
+    }
+
+    if (waitedSel === '.no-results-message' || waitedSel === '.error-message') {
+      throw new Error(`[row ${row}] Detail page reports NO_RESULTS or ERROR`);
+    }
+
+    // STEP 4 — Extract structured detail data
+    const [{ result: detailData }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: detailSelectors => {
+        const out = {};
+        for (const cfg of detailSelectors || []) {
+          const elems = Array.from(document.querySelectorAll(cfg.selector));
+          out[cfg.id] = elems.length
+            ? (cfg.multiple
+                ? elems.map(el => (el.innerText ?? '').trim())
+                : (elems[0][cfg.type === 'SelectorText' ? 'innerText' : 'innerHTML'] ?? '').trim())
+            : (cfg.multiple ? [] : null);
+        }
+        return out;
+      },
+      args: [config.detailSelectors]
+    });
+
+    // Success → clear retry count for this URL
+    urlRetries.delete(url);
+
+    return detailData;
+  } finally {
+    await safeRemoveTab(tabId);
+  }
+}
+
+// ───────────────────────────────────────────────────────────
+// Log detail-page data into "For REI Upload" sheet
+async function logDetailPageData(detailData) {
+  if (
+    !detailData ||
+    typeof detailData.sourceRow !== 'number' ||
+    detailData.sourceRow < 1
+  ) {
+    throw new Error(`Invalid or missing sourceRow: ${detailData?.sourceRow}`);
+  }
+
+  const token = await getServiceAccountToken();
+  const ssId = config.spreadsheetId;
+  const detailSheet = config.detailSheetName;
+  const sourceRow = detailData.sourceRow;
+
+  // 1. Find first empty row in detailSheet (based on column A)
+  const detailRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/` +
+      `${encodeURIComponent(detailSheet)}!A:A`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  const { values: detailVals = [] } = await detailRes.json();
+  let row = 1;
+  while (
+    row <= detailVals.length &&
+    detailVals[row - 1] &&
+    detailVals[row - 1][0] !== ''
+  ) {
+    row++;
+  }
+
+  // 2. Read Site from column B in mainSheet (sourceRow)
+  const siteRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/` +
+      `${encodeURIComponent(config.sheetName)}!B${sourceRow}:B${sourceRow}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  const { values: siteVals = [] } = await siteRes.json();
+  const site = (siteVals[0] && siteVals[0][0]) || '';
+
+  // 3. Split full name into first and last
+  const full = detailData.Fullname || '';
+  const parts = full.trim().split(/\s+/);
+  const firstName = parts.shift() || '';
+  const lastName = parts.join(' ') || '';
+
+  // 4. Detect phone count (cap at 5)
+  let phoneCount = config.detailSelectors.filter(sel =>
+    /^Phone Number \d+$/.test(sel.id)
+  ).length;
+  phoneCount = Math.min(phoneCount, 5);
+
+  // 5. Collect phones & types
+  const phones = [];
+  for (let i = 1; i <= phoneCount; i++) {
+    phones.push(detailData[`Phone Number ${i}`] || '');
+    phones.push(detailData[`Phone Type ${i}`] || '');
+  }
+
+  // 6. Collect emails
+  const emailCount = config.detailSelectors.filter(sel =>
+    /^Email \d+$/.test(sel.id)
+  ).length;
+  const emails = [];
+  for (let i = 1; i <= emailCount; i++) {
+    emails.push(detailData[`Email ${i}`] || '');
+  }
+
+  // 7. Prepare row values
+  const rowVals = [site, firstName, lastName, ...phones, ...emails];
+  const lastCol = toColumnLetter(rowVals.length);
+  const range = `${encodeURIComponent(detailSheet)}!A${row}:${lastCol}${row}`;
+
+  // 8. PUT into the found empty row
+  const putRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/${range}` +
+      `?valueInputOption=RAW`,
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ values: [rowVals] }),
+    }
+  );
+
+  if (!putRes.ok) {
+    const errText = await putRes.text();
+    throw new Error(`Failed to log detail data: ${putRes.status} ${errText}`);
+  }
+
+  console.log(`✅ Logged detail-page row ${row} in "${detailSheet}"`);
+}
+
+// ───────────────────────────────────────────────────────────
+// 1. Load config.json & init ECDSA keyPair
+async function loadConfigAndKeys() {
+  const r = await fetch(chrome.runtime.getURL('config.json'));
+  config = await r.json();
+
+  const { pubJwk, privJwk } = await chrome.storage.local.get([
+    'pubJwk', 'privJwk'
+  ]);
+  if (pubJwk && privJwk) {
+    keyPair = {
+      publicKey: await crypto.subtle.importKey(
+        'jwk', pubJwk, { name:'ECDSA', namedCurve:'P-256' }, true, ['verify']
+      ),
+      privateKey: await crypto.subtle.importKey(
+        'jwk', privJwk, { name:'ECDSA', namedCurve:'P-256' }, true, ['sign']
+      )
+    };
+  } else {
+    keyPair = await genSigningKey();
+    const [ePub, ePriv] = await Promise.all([
+      crypto.subtle.exportKey('jwk', keyPair.publicKey),
+      crypto.subtle.exportKey('jwk', keyPair.privateKey)
+    ]);
+    await chrome.storage.local.set({ pubJwk: ePub, privJwk: ePriv });
+  }
+}
+
+// ───────────────────────────────────────────────────────────
+// 2. Load service-account.json and import RSA private key
+async function loadServiceAccount() {
+  const res = await fetch(chrome.runtime.getURL('service-account.json'));
+  if (!res.ok) throw new Error(`svc acct load failed: ${res.status}`);
+  const svcAcct = await res.json();
+  rsaPrivateKey = await importKeyFromPem(svcAcct.private_key, 'RSA');
+  return svcAcct;
+}
+
+// Sign JWT assertion
+async function signJwtAssertion(unsignedJwt) {
+  if (!rsaPrivateKey) {
+    throw new Error('RSA private key not loaded');
+  }
+  const signatureBuffer = await signRS256(rsaPrivateKey, unsignedJwt);
+  const sig = btoa(String.fromCharCode(...new Uint8Array(signatureBuffer)))
+    .replace(/=+$/, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+  return sig;
+}
+
+// Get Google Sheets API token
+async function getServiceAccountToken() {
+  const now = Math.floor(Date.now() / 1000);
+  if (config.tokenCache && config.tokenCache.token && config.tokenCache.expiry > now + 60) {
+    return config.tokenCache.token;
+  }
+
+  const hdr = { alg: 'RS256', typ: 'JWT' };
+  const pld = {
+    iss: serviceAccount.client_email,
+    scope: 'https://www.googleapis.com/auth/spreadsheets',
+    aud: serviceAccount.token_uri,
+    iat: now,
+    exp: now + 3600,
+  };
+  const b64 = obj =>
+    btoa(JSON.stringify(obj))
+      .replace(/=+$/, '')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_');
+
+  const unsigned = [b64(hdr), b64(pld)].join('.');
+  const signature = await signJwtAssertion(unsigned);
+  const assertion = `${unsigned}.${signature}`;
+
+  const tokRes = await fetch(serviceAccount.token_uri, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer` +
+          `&assertion=${assertion}`,
+  });
+
+  if (!tokRes.ok) {
+    throw new Error(`Token request failed: ${tokRes.status} ${await tokRes.text()}`);
+  }
+  const { access_token, expires_in } = await tokRes.json();
+  config.tokenCache = { token: access_token, expiry: now + expires_in };
+  return access_token;
+}
+
+// ───────────────────────────────────────────────────────────
+// 4. Fetch URLs & filter rows lacking U–AG data
+async function fetchUrlsFromSheet() {
+  const token = await getServiceAccountToken();
+  const { spreadsheetId, urlRange, sheetName } = config;
+
+  const urlRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/` +
+      `${encodeURIComponent(urlRange)}?majorDimension=ROWS`,
+    { headers:{ Authorization:`Bearer ${token}` } }
+  );
+  if (!urlRes.ok) throw new Error(await urlRes.text());
+  const { values=[] } = await urlRes.json();
+  if (!values.length) return [];
+
+  const startRow = +urlRange.match(/\d+/)[0];
+  const entries = values
+    .map((r, i) => ({ url: r[0]?.trim(), row: startRow + i }))
+    .filter(e => e.url);
+
+  const endRow = startRow + values.length - 1;
+  const logRange = `${sheetName}!U${startRow}:AG${endRow}`;
+  const logRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/` +
+      `${encodeURIComponent(logRange)}?majorDimension=ROWS`,
+    { headers:{ Authorization:`Bearer ${token}` } }
+  );
+  const { values: logVals=[] } = await logRes.json();
+
+  return entries.filter((e, i) => {
+    const rowLog = logVals[i] || [];
+    return !rowLog.some(cell => String(cell||'').trim());
+  });
+}
+
+// ───────────────────────────────────────────────────────────
+// 5. Fetch F–L names for fuzzy matching
+async function fetchRowNames(row) {
+  const token = await getServiceAccountToken();
+  const { spreadsheetId, sheetName } = config;
+  const range = `${sheetName}!F${row}:L${row}`;
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/` +
+      `${encodeURIComponent(range)}?majorDimension=ROWS`,
+    { headers:{ Authorization:`Bearer ${token}` } }
+  );
+  if (!res.ok) throw new Error(await res.text());
+  const { values=[] } = await res.json();
+  return (values[0]||[]).map(v => String(v||'').trim());
+}
+
+// ───────────────────────────────────────────────────────────
+// 6a. Log NO_RESULTS fallback in U→AG
+async function logResults(row, data) {
+  const token = await getServiceAccountToken();
+  const { spreadsheetId, sheetName, maxPairs } = config;
+  const flat = [];
+  for (let i = 1; i <= maxPairs; i++) {
+    flat.push(data[`Person ${i}`]||'');
+    flat.push(data[`HREF ${i}`]||'');
+  }
+  const values = [data.Site||'', ...flat];
+  const startCol = 21; // U
+  const endCol = startCol + values.length - 1;
+  const range = `${sheetName}!${toColumnLetter(startCol)}${row}:` +
+                `${toColumnLetter(endCol)}${row}`;
+
+  await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/` +
+      `${encodeURIComponent(range)}?valueInputOption=RAW`,
+    {
+      method:'PUT',
+      headers:{
+        Authorization:`Bearer ${token}`,
+        'Content-Type':'application/json'
+      },
+      body: JSON.stringify({ values:[values] })
+    }
+  );
+  console.log(`✅ NO_RESULTS logged for row ${row}`);
+}
+
+// ───────────────────────────────────────────────────────────
+// 6b. Log confirmed matches in U→AG
+async function logConfirmedMatches(row, site, matches) {
+  const token = await getServiceAccountToken();
+  const { spreadsheetId, sheetName, maxPairs } = config;
+
+  // Decide proper base URL depending on the site
+  const getBaseUrl = (site) => {
+    if (site.includes("fastpeoplesearch")) {
+      return "https://www.fastpeoplesearch.com";
+    }
+    if (/^https?:\/\//i.test(site)) {
+      return site; // full site URL already
+    }
+    return `https://${site}`; // fallback
+  };
+
+  // Normalize and clean all hrefs using the existing helper
+  const baseUrl = getBaseUrl(site);
+
+  const cleanMatches = matches
+    .map(m => {
+      const normalized = normalizeHrefs([m.href], baseUrl)[0] || "";
+      return { name: m.name, href: normalized };
+    })
+    .filter(m => {
+      // Drop invalid or empty hrefs
+      return m.href && /^https?:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(m.href);
+    });
+
+  // Flatten into [name, href, name, href, ...]
+  let flat = cleanMatches.flatMap(m => [m.name, m.href]);
+
+  // Respect maxPairs limit if set
+  if (maxPairs > 0) {
+    flat = flat.slice(0, maxPairs * 2);
+  }
+
+  // Prepare payload for Google Sheets
+  const values = [site, ...flat];
+  const startCol = 21;
+  const endCol = startCol + values.length - 1;
+  const range = `${sheetName}!${toColumnLetter(startCol)}${row}:` +
+                `${toColumnLetter(endCol)}${row}`;
+
+  // Send to Google Sheets API
+  await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/` +
+      `${encodeURIComponent(range)}?valueInputOption=RAW`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ values: [values] })
+    }
+  );
+
+  console.log(`✅ Logged ${cleanMatches.length} matches for row ${row}`);
+}
+
+// ───────────────────────────────────────────────────────────
+// Check if U→AG already has data
+async function hasLoggedData(row) {
+  const token = await getServiceAccountToken();
+  const { spreadsheetId, sheetName } = config;
+  const range = `${sheetName}!U${row}:AG${row}`;
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/` +
+      `${encodeURIComponent(range)}?majorDimension=ROWS`,
+    { headers:{ Authorization:`Bearer ${token}` } }
+  );
+  if (!res.ok) throw new Error(await res.text());
+  const { values=[] } = await res.json();
+  return Array.isArray(values[0]) && values[0].some(c => String(c||'').trim());
+}
+
+async function scrapeUrl({ url, row }) {
+  let tabId = null;
+  let dynamicTimeout = 120_000;
+
+  try {
+    // Open new tab and attach network logging
+    const created = await chrome.tabs.create({ url, active: false });
+    tabId = created?.id;
+    if (!tabId) throw new Error("FAILED_TO_CREATE_TAB");
+
+    attachCfNetworkLoggingForTab(tabId);
+
+    // Try initial load
+    try {
+      await waitForTabComplete(tabId, 45_000);
+    } catch (e) {
+      const decision = await handleTimeoutError(tabId, row, {
+        lastError: e?.message || "waitForTabComplete timeout",
+        heartbeat: true,
+      });
+
+      if (decision === "retry") {
+        console.log(`[row ${row}] Retrying initial load after error`);
+        await waitForTabComplete(tabId, 120_000);
+      } else if (decision === "skip") {
+        return { status: "skipped", meta: { phase: "initial-load" } };
+      } else {
+        return {
+          status: "error",
+          meta: { phase: "initial-load", error: e?.message || "timeout" },
+        };
+      }
+    }
+
+    // Compute dynamic timeout based on resource timings
+    try {
+      const [{ result: perfMs }] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const entries = performance.getEntriesByType("resource");
+          return entries.reduce((m, e) => Math.max(m, e.responseEnd), 0) + 20_000;
+        },
+      });
+      if (typeof perfMs === "number" && perfMs > 0) dynamicTimeout = perfMs;
+    } catch {
+      /* fallback to default timeout */
+    }
+
+    // Scrape attempts loop
+    let data = {};
+    for (
+      let attempt = 1;
+      attempt <= (config?.retryOptions?.maxTimeoutRetries ?? 3);
+      attempt++
+    ) {
+      // Add randomized Fibonacci delay to reduce hammering
+      const delayMs = getFibDelay(attempt);
+      console.log(`[row ${row}] Waiting ${delayMs}ms before attempt #${attempt}`);
+      await delay(delayMs);
+
+      // Attempt to scrape
+      let res,
+        execError = null;
+      try {
+        const timeoutForAttempt =
+          attempt === (config?.retryOptions?.maxTimeoutRetries ?? 3) &&
+          config?.retryOptions?.rescueTimeout
+            ? config.retryOptions.rescueTimeout
+            : dynamicTimeout;
+
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: async (pageSelector, selectors, maxPairs, timeout) => {
+            const waitForAny = (sels, t) =>
+              new Promise((resolve, reject) => {
+                let settled = false;
+                const observers = [];
+                const timer = setTimeout(() => {
+                  if (!settled) {
+                    settled = true;
+                    observers.forEach((mo) => mo.disconnect());
+                    reject(
+                      new Error(
+                        `Timeout waiting for any selector: ${sels.join(", ")}`
+                      )
+                    );
+                  }
+                }, t);
+
+                // If any selector already exists, resolve immediately
+                for (const sel of sels) {
+                  if (document.querySelector(sel)) {
+                    settled = true;
+                    clearTimeout(timer);
+                    observers.forEach((mo) => mo.disconnect());
+                    resolve(sel);
+                    return;
+                  }
+                }
+
+                // Otherwise, watch for changes
+                sels.forEach((sel) => {
+                  const mo = new MutationObserver(() => {
+                    const f = document.querySelector(sel);
+                    if (f && !settled) {
+                      settled = true;
+                      clearTimeout(timer);
+                      observers.forEach((mo) => mo.disconnect());
+                      resolve(sel);
+                    }
+                  });
+                  mo.observe(document, { childList: true, subtree: true });
+                  observers.push(mo);
+                });
+              });
+
+            // Handle bot walls
+            const href = location.href;
+            const botWall =
+              href.includes("/bot-check") ||
+              !!document.querySelector(
+                '#challenge-form, .cf-browser-verification, .hcaptcha-box, .h-captcha, .g-recaptcha, div[data-sitekey][class*="turnstile"]'
+              );
+            if (botWall) return { data: {}, error: "BOT_CHECK" };
+
+            try {
+              const waitedSel = await waitForAny(
+                [
+                  pageSelector,
+                  ".list-results-header h1",
+                  ".list-results",
+                  ".no-results-message",
+                  ".error-message",
+                ],
+                timeout
+              );
+
+              if (
+                [".no-results-message", ".error-message"].includes(waitedSel)
+              ) {
+                return { data: {}, error: "NO_RESULTS" };
+              }
+
+              const out = {};
+              for (const cfg of selectors || []) {
+                const nodes = Array.from(
+                  document.querySelectorAll(cfg.selector || "")
+                );
+                if (!nodes.length) {
+                  out[cfg.id] = cfg.multiple ? [] : null;
+                  continue;
+                }
+                const limited =
+                  cfg.maxPairs > 0 ? nodes.slice(0, cfg.maxPairs) : nodes;
+
+                if (cfg.type === "SelectorText") {
+                  out[cfg.id] = cfg.multiple
+                    ? limited.map((e) => (e.innerText ?? "").trim())
+                    : (limited[0]?.innerText ?? "").trim();
+                } else if (cfg.type === "SelectorElementAttribute") {
+                  out[cfg.id] = cfg.multiple
+                    ? limited.map(
+                        (e) => (e.getAttribute(cfg.extractAttribute) ?? "").trim()
+                      )
+                    : (limited[0]?.getAttribute(cfg.extractAttribute) ?? "").trim();
+                } else {
+                  out[cfg.id] = cfg.multiple
+                    ? limited.map((e) => e.innerHTML ?? "")
+                    : limited[0]?.innerHTML ?? "";
+                }
+              }
+              return { data: out, error: null };
+            } catch (e) {
+              return {
+                data: {},
+                error: e?.message || "UNKNOWN_SCRAPE_ERROR",
+              };
+            }
+          },
+          args: [
+            `${config.pageLoadSelector}, .list-results-header h1, .list-results`,
+            config.selectors,
+            config.maxPairs,
+            timeoutForAttempt,
+          ],
+        });
+
+        if (!result || typeof result !== "object")
+          throw new Error("NULL_OR_INVALID_RESULT");
+        res = result;
+      } catch (e) {
+        execError = e?.message || "EXECUTE_SCRIPT_FAILURE";
+      }
+
+      // Handle script errors
+      if (execError) {
+        console.warn(`Injection failure (attempt ${attempt}): ${execError}`);
+        const decision = await handleTimeoutError(tabId, row, {
+          lastError: execError,
+        });
+
+        if (decision === "retry") {
+          if (globalThis.solverLock) {
+            console.log(`[row ${row}] Waiting for solver to finish before retry`);
+            await globalThis.solverLock;
+          }
+          attempt--;
+          continue;
+        } else if (decision === "skip") {
+          return {
+            status: "skipped",
+            meta: { phase: "execute", error: execError },
+          };
+        } else {
+          return {
+            status: "error",
+            meta: { phase: "execute", error: execError },
+          };
+        }
+      }
+
+      // Successful scrape
+      const err = res.error || null;
+      data = res.data || {};
+
+      if (err === "NO_RESULTS") {
+        return { status: "no-results", data, meta: { phase: "execute" } };
+      }
+
+      if (err === "BOT_CHECK" || /timeout waiting for any selector/i.test(err)) {
+        const decision = await handleTimeoutError(tabId, row, {
+          lastError: err,
+        });
+        if (decision === "retry") {
+          if (globalThis.solverLock) {
+            console.log(`[row ${row}] Waiting for solver to finish before retry`);
+            await globalThis.solverLock;
+          }
+          attempt--;
+          continue;
+        } else if (decision === "skip") {
+          return {
+            status: "skipped",
+            meta: { phase: "execute", error: err },
+          };
+        } else {
+          return {
+            status: "error",
+            meta: { phase: "execute", error: err },
+          };
+        }
+      }
+
+      // If we reached here, data was successfully scraped
+      break;
+    }
+
+    // Post-process scraped data
+    const scraped = [];
+    if (Array.isArray(data.Names) && Array.isArray(data.Hrefs)) {
+      const rawLen = Math.min(data.Names.length, data.Hrefs.length);
+      const limit =
+        config.maxPairs > 0 ? Math.min(rawLen, config.maxPairs) : rawLen;
+      for (let i = 0; i < limit; i++) {
+        const name = (data.Names[i] || "").trim();
+        const href = (data.Hrefs[i] || "").trim();
+        if (name && href) scraped.push({ name, href });
+      }
+    }
+
+    const seenRaw = new Set();
+    const uniqueScraped = [];
+    for (const item of scraped) {
+      const key = `${item.name}||${item.href}`;
+      if (!seenRaw.has(key)) {
+        seenRaw.add(key);
+        uniqueScraped.push(item);
+      }
+    }
+
+    const sheetNames = await fetchRowNames(row);
+    const confirmed = uniqueScraped.filter(
+      (p) =>
+        sheetNames.some(
+          (sn) => similarity(p.name, sn) >= config.matchThreshold
+        )
+    );
+
+    const seenHref = new Set();
+    const uniqueConfirmed = [];
+    for (const m of confirmed) {
+      if (!seenHref.has(m.href)) {
+        seenHref.add(m.href);
+        uniqueConfirmed.push(m);
+      }
+    }
+
+    console.log(`Confirmed unique matches for row ${row}:`, uniqueConfirmed);
+
+    const siteVal = String(data.Site || url).trim();
+    await logConfirmedMatches(row, siteVal, uniqueConfirmed);
+
+    // Follow detail pages if available
+    if (uniqueConfirmed.length && Array.isArray(config.detailSelectors)) {
+      const phoneKeys = config.detailSelectors
+        .filter((sel) => /^Phone Number \d+$/.test(sel.id))
+        .map((sel) => sel.id);
+
+      for (const m of uniqueConfirmed) {
+        const dly = getFibDelay();
+        console.log(`[row ${row}] Waiting ${dly}ms before following detail link`);
+        await delay(dly);
+
+        try {
+          const detailData = await followAndScrapeDetail(m.href, row);
+          const hasPhone = phoneKeys.some((key) => {
+            const v = detailData[key];
+            return typeof v === "string" && v.trim() !== "";
+          });
+
+          if (!hasPhone) {
+            console.log(
+              `Row ${row}: no phone numbers found on detail page ${m.href}, skipping log`
+            );
+            continue;
+          }
+
+          const logDly = getFibDelay();
+          console.log(
+            `[row ${row}] Waiting ${logDly}ms before logging detailed data`
+          );
+          await delay(logDly);
+          await logDetailPageData({ sourceRow: row, ...detailData });
+        } catch (err) {
+          console.error(`Detail error for ${m.href}:`, err);
+        }
+      }
+    }
+
+    return { status: "ok", data, meta: { phase: "done" } };
+  } catch (fatal) {
+    console.error(`scrapeUrl fatal for ${url}:`, fatal?.message || fatal);
+    return {
+      status: "error",
+      meta: { phase: "fatal", error: String(fatal?.message || fatal) },
+    };
+  } finally {
+    // Cleanup
+    const dly = getFibDelay();
+    await delay(dly);
+    if (tabId) {
+      try {
+        await chrome.tabs.remove(tabId);
+      } catch {}
+    }
+
+    if (globalThis.solverLock?.release) {
+      globalThis.solverLock.release();
+      globalThis.solverLock = null;
+      console.log(`[solverLock] Released for ${url}`);
+    }
+  }
+}
+
+// ─────────────────────────────
+// Fibonacci-based batch pause system (no repeats per session)
+let fibBatchPool = null;         // current batch pause pool
+const usedFibBatch = new Set();  // tracks all used batch pauses globally
+
+/**
+ * Initialize or reset the Fibonacci batch pool.
+ * Optionally shuffle to randomize order.
+ */
+function initFibBatchPool() {
+  const minMs = 12_990;           // 12.990 seconds
+  const maxMs = 60_000;           // 60 seconds
+  const scale = 1000;               // scale factor for Fibonacci numbers
+
+  // Generate Fibonacci numbers until maxMs / scale
+  const fibs = [1, 1];
+  while (true) {
+    const next = fibs[fibs.length - 1] + fibs[fibs.length - 2];
+    if (next * scale > maxMs) break;
+    fibs.push(next);
+  }
+
+  // Convert to milliseconds and filter by minMs
+  fibBatchPool = fibs.map(n => n * scale).filter(n => n >= minMs);
+
+  // Shuffle for randomness
+  for (let i = fibBatchPool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [fibBatchPool[i], fibBatchPool[j]] = [fibBatchPool[j], fibBatchPool[i]];
+  }
+}
+
+/**
+ * Return a batch pause in ms.
+ * Guarantees no repeats per session, auto-resets if exhausted.
+ */
+function getBatchPauseMs() {
+  if (!fibBatchPool || fibBatchPool.length === 0) {
+    console.warn('Batch Fibonacci pool exhausted, reinitializing...');
+    initFibBatchPool();
+  }
+
+  while (fibBatchPool.length) {
+    const delay = fibBatchPool.pop();
+    if (!usedFibBatch.has(delay)) {
+      usedFibBatch.add(delay);
+      return delay;
+    }
+  }
+
+  // All batch values used, reset session history
+  console.warn('All unique batch Fibonacci pauses used, resetting session history...');
+  usedFibBatch.clear();
+  initFibBatchPool();
+  return getBatchPauseMs(); // retry after reset
+}
+
+/**
+ * Optional: manually reset batch pool and used history
+ */
+function resetBatchFibPool() {
+  fibBatchPool = null;
+  usedFibBatch.clear();
+}
+
+
+// helper: match the specific CF Turnstile headers
+function isCfTurnstileRequest(headers) {
+  return headers['origin'] === 'https://challenges.cloudflare.com'
+    && headers['referer']?.startsWith('https://challenges.cloudflare.com/cdn-cgi/challenge-platform')
+    && headers['content-length'] === '4482'
+    && headers['content-type']?.startsWith('text/plain')
+    && headers['dnt'] === '1'
+    && headers['priority'] === 'u=1, i';
+}
+
+function attachCfNetworkLoggingForTab(tabId) {
+  const filter = { urls: ["<all_urls>"], tabId };
+
+  // To avoid multiple cooldown triggers for the same tab & URL
+  const triggeredCooldowns = new Set();
+
+  const onBeforeSendHeaders = details => {
+    const headers = Object.fromEntries(
+      details.requestHeaders.map(h => [h.name.toLowerCase(), h.value])
+    );
+    if (isCfTurnstileRequest(headers)) {
+      console.log(`🌐 [CF XHR] ${details.method} ${details.url}`, headers);
+    }
+  };
+
+  const onCompleted = details => {
+    console.log(`📥 [CF XHR RESPONSE] ${details.statusCode} ${details.url}`);
+
+    // Avoid duplicate triggers for same URL + statusCode within the same tab
+    const key = `${details.url}|${details.statusCode}`;
+    if (triggeredCooldowns.has(key)) return;
+    triggeredCooldowns.add(key);
+
+    // --- Detect throttling / blocking ---
+    if (details.statusCode === 429) {
+      // Too many requests → exponential backoff, but cap delay
+      requestQueue.setDelay(
+        Math.min(requestQueue.dynamicDelay * 2, 120000) // cap at 2 minutes
+      );
+      console.warn(
+        `🚫 429 Too Many Requests → Pausing queue for ${requestQueue.dynamicDelay}ms`
+      );
+      requestQueue.pause("HTTP 429 Too Many Requests");
+    } else if (details.statusCode === 403) {
+      // Forbidden → usually Cloudflare challenge failed → back off harder
+      requestQueue.setDelay(
+        Math.min(requestQueue.dynamicDelay * 3, 180000) // cap at 3 minutes
+      );
+      console.warn(
+        `⛔ 403 Forbidden → Pausing queue for ${requestQueue.dynamicDelay}ms`
+      );
+      requestQueue.pause("HTTP 403 Forbidden");
+    }
+  };
+
+  chrome.webRequest.onBeforeSendHeaders.addListener(
+    onBeforeSendHeaders,
+    filter,
+    ["requestHeaders"]
+  );
+  chrome.webRequest.onCompleted.addListener(onCompleted, filter);
+
+  // Cleanup when tab closes
+  const cleanup = id => {
+    if (id === tabId) {
+      chrome.webRequest.onBeforeSendHeaders.removeListener(onBeforeSendHeaders);
+      chrome.webRequest.onCompleted.removeListener(onCompleted);
+      chrome.tabs.onRemoved.removeListener(cleanup);
+    }
+  };
+  chrome.tabs.onRemoved.addListener(cleanup);
+}
+
+(async () => {
+  try {
+    await loadConfigAndKeys();
+    config.serviceAccount = await loadServiceAccount();
+    serviceAccount = config.serviceAccount;
+    console.log("🚀 Config & Service Account loaded");
+
+    const tasks = await fetchUrlsFromSheet();
+    console.log(`📌 Total URLs to scrape: ${tasks.length}`);
+
+    const seen = new Set();
+    const activeTabIds = new Set();
+    const siteCooldowns = new Map();
+    const COOLDOWN_BASE_MS = 90_000; // start with 90s
+
+    const getCooldownMs = hostname => {
+      const state = siteCooldowns.get(hostname) || { until: 0, strikes: 0 };
+      return Math.min(COOLDOWN_BASE_MS * 2 ** state.strikes, 600_000); // cap at 10m
+    };
+
+    const isCoolingDown = url => {
+      const hostname = new URL(url).hostname;
+      const until = siteCooldowns.get(hostname)?.until || 0;
+      return Date.now() < until;
+    };
+
+    const markCooldown = (url, forceMs = null) => {
+      const hostname = new URL(url).hostname;
+      const state = siteCooldowns.get(hostname) || { strikes: 0, until: 0 };
+      const strikes = state.strikes + 1;
+      const delayMs = forceMs || getCooldownMs(hostname);
+      siteCooldowns.set(hostname, { strikes, until: Date.now() + delayMs });
+      console.warn(`⏳ [${hostname}] Cooling down ${Math.round(delayMs/1000)}s (strike #${strikes})`);
+    };
+
+    // Enqueue all tasks with queue backpressure + cooldown awareness
+    for (const { url, row } of tasks) {
+      requestQueue.add(async () => {
+        // Respect GLOBAL cooldown first
+        await maybeWaitForCooldown();
+
+        // Skip rows already logged
+        let alreadyLogged = false;
+        try {
+          alreadyLogged = await hasLoggedData(row);
+        } catch (err) {
+          console.warn(`  • Could not fetch logged state for row ${row}:`, err);
+        }
+        if (alreadyLogged) {
+          console.log(`  • Row ${row} already logged, skipping`);
+          return;
+        }
+
+        // Deduplicate URLs
+        const hash = await sha256Hex(url);
+        if (seen.has(hash)) {
+          console.log(`  • Duplicate ${url}, skipping`);
+          return;
+        }
+        seen.add(hash);
+
+        // Respect per-site cooldowns
+        if (isCoolingDown(url)) {
+          const hostname = new URL(url).hostname;
+          const waitMs = siteCooldowns.get(hostname).until - Date.now();
+          console.warn(`⏳ [${hostname}] Still cooling down ${Math.ceil(waitMs / 1000)}s`);
+          await safeDelay(waitMs);
+        }
+
+        try {
+          if (activeTabIds.has(url)) {
+            console.warn(`⚠️ Already scraping ${url}, skipping`);
+            return;
+          }
+          activeTabIds.add(url);
+
+          const result = await scrapeUrl({ url, row });
+
+          // If your scrapeUrl returns structured statuses:
+          if (result?.status === "rate-limit" || result?.status === "captcha") {
+            markCooldown(url);
+            setGlobalCooldown(60_000, result.status.toUpperCase());
+            if (typeof requestQueue?.pause === 'function') {
+              requestQueue.setDelay(Math.min(Math.max(requestQueue.dynamicDelay * 2, 1500), 60000));
+              requestQueue.pause(`Paused due to ${result.status}`);
+            }
+          }
+        } catch (e) {
+          console.error(`  • scrapeUrl error for ${url}:`, e);
+          const msg = String(e?.message || e);
+          if (/429|rate.?limit|too many/i.test(msg) || /captcha|turnstile/i.test(msg)) {
+            markCooldown(url);
+            setGlobalCooldown(60_000, "error-triggered rate limit");
+            if (typeof requestQueue?.pause === 'function') {
+              requestQueue.setDelay(Math.min(Math.max(requestQueue.dynamicDelay * 2, 1500), 60000));
+              requestQueue.pause("HTTP 429 (from exception)");
+            }
+          }
+        } finally {
+          activeTabIds.delete(url);
+          await safeDelay(10); // tiny cleanup pause respecting cooldowns
+        }
+      });
+    }
+
+    // Wait until queue finishes
+    const waitUntilDone = () =>
+      new Promise(resolve => {
+        const interval = setInterval(() => {
+          if (requestQueue.queue.length === 0 && requestQueue.activeCount === 0) {
+            clearInterval(interval);
+            resolve();
+          }
+        }, 500);
+      });
+
+    await waitUntilDone();
+    console.log("🏁 All done");
+  } catch (err) {
+    console.error("Fatal error during bootstrap:", err);
+  } finally {
+    if (globalThis.solverLock?.release) {
+      globalThis.solverLock.release();
+      globalThis.solverLock = null;
+    }
+  }
+})();
+
+// ─────────────────────────────────────────────
+// 🐕 Queue Watchdog — logs current state every 15s
+// ─────────────────────────────────────────────
+const WATCHDOG_INTERVAL = 15_000;
+
+setInterval(() => {
+  const q = requestQueue;
+  const now = Date.now();
+  const inCooldown = now < globalCooldownUntil;
+
+  const state = {
+    queued: q.queue.length,
+    active: q.activeCount,
+    paused: q.paused,
+    delay: q.dynamicDelay,
+    cooldown: inCooldown ? `${globalCooldownUntil - now}ms` : 'none',
+    nextRun: q.paused
+      ? `${Math.max(0, q.pausedUntil - now)}ms`
+      : inCooldown
+      ? `${globalCooldownUntil - now}ms`
+      : 'ready'
+  };
+
+  console.log(
+    `%c[WATCHDOG]`,
+    "color: orange; font-weight: bold;",
+    state
+  );
+}, WATCHDOG_INTERVAL);
+
+// ─────────────────────────────────────────────
+// 🧹 Tab Garbage Collector — closes stale tabs
+// ─────────────────────────────────────────────
+const TAB_GC_INTERVAL = 60_000;  // every 1 minute
+const TAB_MAX_AGE = 2 * 60_000;  // tabs older than 2 minutes are killed
+
+const openTabTimestamps = new Map();
+
+function trackTabOpen(tabId) {
+  openTabTimestamps.set(tabId, Date.now());
+}
+
+function trackTabClose(tabId) {
+  openTabTimestamps.delete(tabId);
+}
+
+chrome.tabs.onCreated.addListener(tab => {
+  if (typeof tab.id === "number") trackTabOpen(tab.id);
+});
+
+chrome.tabs.onRemoved.addListener(tabId => {
+  trackTabClose(tabId);
+});
+
+setInterval(async () => {
+  const now = Date.now();
+  for (const [tabId, openedAt] of openTabTimestamps) {
+    if (now - openedAt > TAB_MAX_AGE) {
+      try {
+        await chrome.tabs.remove(tabId);
+        console.warn(`🧹 GC closed stale tab ${tabId}`);
+      } catch {
+        // tab probably already closed
+      }
+      openTabTimestamps.delete(tabId);
+    }
+  }
+}, TAB_GC_INTERVAL);

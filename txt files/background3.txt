@@ -1,0 +1,1610 @@
+// background.js
+// Chrome MV3 service worker ("type": "module" in manifest.json")
+// @ts-nocheck
+// --- 2Captcha solver integration ---
+import './solver.worker.js';
+
+import {
+  importKeyFromPem,
+  signRS256,
+  sha256Hex,
+} from './crypto-utils.js';
+import { genSigningKey } from './crypto-utils.js';
+
+// ---- GLOBAL REQUEST QUEUE ----
+class RequestQueue {
+  constructor(concurrency = 3, baseDelay = 30000) {
+    this.queue = [];
+    this.activeCount = 0;
+    this.concurrency = concurrency;
+    this.baseDelay = baseDelay;
+    this.dynamicDelay = baseDelay;
+    this.paused = false;
+  }
+
+  setDelay(ms) {
+    this.dynamicDelay = Math.min(ms, 60000); // hard cap at 1min
+  }
+
+  pause(reason = "Server busy") {
+    if (this.paused) return; // already paused
+    this.paused = true;
+    console.warn(`⏸ Queue paused: ${reason} — resuming in ${this.dynamicDelay}ms`);
+    setTimeout(() => {
+      console.log(`▶ Queue resumed`);
+      this.paused = false;
+      this._next();
+    }, this.dynamicDelay);
+  }
+
+  add(fn) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ fn, resolve, reject });
+      this._next();
+    });
+  }
+
+  async _next() {
+    if (this.activeCount >= this.concurrency || this.queue.length === 0 || this.paused) return;
+
+    const { fn, resolve, reject } = this.queue.shift();
+    this.activeCount++;
+
+    try {
+      const result = await fn();
+      resolve(result);
+    } catch (err) {
+      reject(err);
+    }
+
+    this.activeCount--;
+    setTimeout(() => this._next(), this.dynamicDelay);
+  }
+}
+
+const requestQueue = new RequestQueue(3, 1500);
+
+//_____________________________________
+
+let rsaPrivateKey;
+let config;
+let serviceAccount;
+let keyPair = null;
+const seen = new Set();
+
+// --- globals & imports
+const cfChallengeMeta = new Map();
+
+let globalCooldownUntil = 0; // timestamp in ms
+
+// Helper: delay with Promise
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Helper: set global cooldown
+function setGlobalCooldown(ms, reason = "Unknown") {
+  const until = Date.now() + ms;
+  if (until > globalCooldownUntil) {
+    globalCooldownUntil = until;
+    console.warn(`⏸ Global cooldown triggered for ${ms}ms (${reason})`);
+  }
+}
+
+// Helper: wait if global cooldown is active
+async function maybeWaitForCooldown() {
+  const now = Date.now();
+  if (now < globalCooldownUntil) {
+    const waitMs = globalCooldownUntil - now;
+    console.log(`⏳ Waiting ${waitMs}ms due to active cooldown...`);
+    await delay(waitMs);
+  }
+}
+
+// Attach listener for outgoing requests
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  details => {
+    const headers = details.requestHeaders
+      ? Object.fromEntries(details.requestHeaders.map(h => [h.name.toLowerCase(), h.value]))
+      : {};
+
+    // Detect Turnstile requests
+    const isCfTurnstile =
+      headers['origin'] === 'https://challenges.cloudflare.com' &&
+      headers['referer']?.includes('/cdn-cgi/challenge-platform/') &&
+      headers['content-type']?.startsWith('text/plain');
+
+    // Store Turnstile sitekey & iframe URL if detected
+    if (typeof details.tabId === 'number' && details.tabId >= 0) {
+      if (/\/turnstile\/if\//.test(details.url)) {
+        const m = details.url.match(/\/(0x[0-9A-Za-z]+)\//);
+        if (m) {
+          const meta = cfChallengeMeta.get(details.tabId) || {};
+          meta.sitekey = m[1];
+          meta.ifUrl = details.url;
+          cfChallengeMeta.set(details.tabId, meta);
+
+          console.warn(`⚠️ Turnstile detected on tab ${details.tabId} (sitekey: ${meta.sitekey})`);
+          setGlobalCooldown(45_000, "Cloudflare Turnstile detected");
+        }
+      }
+
+      // Store Ray ID if found in URL
+      if (/ray=/.test(details.url)) {
+        const u = new URL(details.url);
+        const meta = cfChallengeMeta.get(details.tabId) || {};
+        meta.rayId = u.searchParams.get('ray');
+        cfChallengeMeta.set(details.tabId, meta);
+
+        console.log(`🔎 Captured CF Ray ID for tab ${details.tabId}: ${meta.rayId}`);
+      }
+    }
+  },
+  { urls: ['<all_urls>'] },
+  ['requestHeaders']
+);
+
+// Attach listener for completed responses — detect 429s & Retry-After
+chrome.webRequest.onCompleted.addListener(
+  details => {
+    if (details.statusCode === 429) {
+      console.warn(`🚫 429 Too Many Requests detected on ${details.url}`);
+      setGlobalCooldown(60_000, "Hit 429 rate-limit");
+    }
+
+    // Check for Retry-After header (not always provided, but if it is, obey it)
+    if (details.responseHeaders) {
+      const retryAfter = details.responseHeaders.find(
+        h => h.name.toLowerCase() === 'retry-after'
+      );
+      if (retryAfter) {
+        const retryMs = isNaN(retryAfter.value)
+          ? 30_000 // fallback if non-numeric value
+          : Number(retryAfter.value) * 1000;
+
+        console.warn(`⏳ Server requested retry-after: ${retryMs}ms`);
+        setGlobalCooldown(retryMs, "Retry-After header");
+      }
+    }
+  },
+  { urls: ['<all_urls>'] },
+  ['responseHeaders']
+);
+
+// ─────────────────────────────────────────────
+// Message bridge for retrieving stored metadata
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.__solverGetTurnstileMeta) {
+    if (sender.tab && typeof sender.tab.id === 'number' && sender.tab.id >= 0) {
+      sendResponse(cfChallengeMeta.get(sender.tab.id) || null);
+    } else {
+      sendResponse(null);
+    }
+    return true;
+  }
+});
+
+// ─────────────────────────────────────────────
+// Export cooldown-aware delay function for scrapers
+async function safeDelay(ms) {
+  // First respect any global cooldown
+  await maybeWaitForCooldown();
+  // Then apply your normal per-request delay
+  await delay(ms);
+}
+
+
+// ─────────────────────────────
+// Fibonacci delay system (no repeats per session)
+let fibDelayPool = null;         // current pool
+const usedFibDelays = new Set(); // tracks all used delays globally
+
+/**
+ * Generate a Fibonacci sequence up to a maximum value.
+ * Each value is scaled by `scale` for finer control.
+ */
+function generateFibonacci(max, scale = 1) {
+  const fib = [1, 1];
+  while (true) {
+    const next = fib[fib.length - 1] + fib[fib.length - 2];
+    if (next * scale > max) break;
+    fib.push(next);
+  }
+  return fib.map(n => n * scale);
+}
+
+/**
+ * Initialize or reset the Fibonacci delay pool.
+ * Optionally shuffle to randomize order.
+ */
+function initFibDelayPool() {
+  const { max = 10000, scale = 1 } = config.requestOptions?.fibDelays || {};
+  fibDelayPool = generateFibonacci(max, scale);
+
+  // Shuffle for randomness
+  for (let i = fibDelayPool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [fibDelayPool[i], fibDelayPool[j]] = [fibDelayPool[j], fibDelayPool[i]];
+  }
+}
+
+/**
+ * Return a Fibonacci-based delay.
+ * Guarantees no repeats in the current session.
+ * Auto-resets the pool if exhausted, skipping already-used values.
+ */
+function getFibDelay() {
+  if (!fibDelayPool || fibDelayPool.length === 0) {
+    console.warn('Fibonacci pool exhausted, reinitializing...');
+    initFibDelayPool();
+  }
+
+  while (fibDelayPool.length) {
+    const delay = fibDelayPool.pop();
+    if (!usedFibDelays.has(delay)) {
+      usedFibDelays.add(delay);
+      return delay;
+    }
+  }
+
+  // All values in pool have been used; you can reset usedFibDelays if you want a new cycle
+  console.warn('All unique Fibonacci delays have been used, resetting session history...');
+  usedFibDelays.clear();
+  initFibDelayPool();
+  return getFibDelay(); // retry after reset
+}
+
+/**
+ * Manual reset of the Fibonacci delay pool and used delays.
+ */
+function resetFibDelayPool() {
+  fibDelayPool = null;
+  usedFibDelays.clear();
+}
+
+// ─────────────────────────────
+// Default error patterns
+const defaultErrorPatterns = {
+  noResults: ['no results found', 'nothing matched', 'no listings found'],
+  captcha: ['g-recaptcha', 'turnstile', 'captcha', 'bot-check'],
+  rateLimit: ['rate limit', 'too many requests', 'temporarily blocked']
+};
+
+// Global solver lock to avoid race conditions
+globalThis.solverLock = null;
+
+// Track retries per row
+const rowRetries = new Map();
+
+async function handleTimeoutError(tabId, row, opts = {}) {
+  const { heartbeat = false, lastError = '' } = opts;
+  let text = '';
+
+  // Track retry count
+  const retries = (rowRetries.get(row) || 0) + 1;
+  rowRetries.set(row, retries);
+
+  // Hard cap to prevent infinite loops
+  if (retries > (config.maxRetries || 7)) {
+    console.warn(`🛑 [Row ${row}] Exceeded max retries (${retries}) – skipping`);
+    await chrome.tabs.remove(tabId).catch(() => {});
+    return 'skip';
+  }
+
+  // Grab diagnostic text safely
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () =>
+        (document.body?.innerText || document.documentElement?.innerText || '').slice(0, 20000)
+    });
+    text = result || '';
+  } catch (err) {
+    console.warn(`[Row ${row}] Failed to grab page text:`, err);
+  }
+
+  const patterns = config?.errorPatterns || defaultErrorPatterns;
+  const noRe   = new RegExp(patterns.noResults.join('|'), 'i');
+  const capRe  = new RegExp(patterns.captcha.join('|'), 'i');
+  const rateRe = new RegExp(patterns.rateLimit.join('|'), 'i');
+
+  console.warn(`🧪 [Row ${row}] error check snapshot (first 5k chars):`, text.slice(0, 5000));
+
+  // Case: No results
+  if (noRe.test(text)) {
+    console.warn(`⚪ [Row ${row}] detected NO_RESULTS – skipping`);
+    await chrome.tabs.remove(tabId).catch(() => {});
+    return 'skip';
+  }
+
+  // Case: Captcha / challenge
+  if (capRe.test(text)) {
+    console.warn(`🚧 [Row ${row}] CAPTCHA detected`);
+    ensureSolverLock();
+    return 'retry';
+  }
+
+  // Case: Rate limit
+  if (rateRe.test(text)) {
+    console.warn(`🐌 [Row ${row}] RATE_LIMIT – pausing 3 min`);
+    await chrome.tabs.remove(tabId).catch(() => {});
+    await delay(180_000);
+    return 'retry';
+  }
+
+  // Case: Selector timeout
+  if (lastError?.toLowerCase()?.includes('timeout waiting for any selector')) {
+    console.warn(`⏱ [Row ${row}] Selector timeout – Fibonacci backoff`);
+    ensureSolverLock();
+
+    const fibDelayMs = getFibDelay();
+    console.log(`[Row ${row}] Waiting ${fibDelayMs}ms before retry`);
+    await delay(fibDelayMs);
+
+    // Limit reload count to prevent loop
+    if (retries <= 3) {
+      try {
+        await chrome.tabs.reload(tabId, { bypassCache: true });
+        console.log(`[Row ${row}] Reload triggered`);
+      } catch (e) {
+        console.warn(`[Row ${row}] Reload failed:`, e);
+      }
+    }
+    return 'retry';
+  }
+
+  // Case: Unclassified timeout, maybe CAPTCHA
+  const meta = cfChallengeMeta.get(tabId) || {};
+  if (meta.sitekey || meta.rayId) {
+    console.warn(`🚧 [Row ${row}] Timeout → likely CAPTCHA (sitekey=${meta.sitekey || 'n/a'}, rayId=${meta.rayId || 'n/a'})`);
+    ensureSolverLock();
+    if (heartbeat) console.log(`[Row ${row}] Heartbeat active: solver will handle`);
+
+    if (retries <= 3) {
+      try {
+        await chrome.tabs.reload(tabId, { bypassCache: true });
+        console.log(`[Row ${row}] Reload triggered`);
+      } catch (e) {
+        console.warn(`[Row ${row}] Reload failed:`, e);
+      }
+    }
+    return 'retry';
+  }
+
+  // Default fallback
+  console.warn(`⚠️ [Row ${row}] Unclassified timeout – closing tab`);
+  await chrome.tabs.remove(tabId).catch(() => {});
+  return 'skip';
+}
+
+
+// ─────────────────────────────
+// Ensure a single solverLock exists globally
+function ensureSolverLock() {
+  if (!globalThis.solverLock) {
+    let release;
+    globalThis.solverLock = new Promise(res => (release = res));
+    globalThis.solverLock.release = release;
+  }
+}
+
+
+function toColumnLetter(num) {
+  let s = '', n = num;
+  while (n > 0) {
+    let m = (n - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+// ─────────────────────────────
+// Levenshtein & similarity
+function levenshtein(a, b) {
+  const dp = Array(a.length + 1).fill().map(() => Array(b.length + 1).fill(0));
+  for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+function similarity(a, b) {
+  a = a.trim().toLowerCase();
+  b = b.trim().toLowerCase();
+  const maxLen = Math.max(a.length, b.length);
+  return maxLen ? 1 - levenshtein(a, b) / maxLen : 0;
+}
+
+// ─────────────────────────────
+// Normalize hrefs
+function normalizeHrefs(rawHrefs = [], baseUrl = '') {
+  if (!Array.isArray(rawHrefs)) return [];
+  const out = [];
+  for (const raw of rawHrefs) {
+    if (typeof raw !== 'string') continue;
+    const href = raw.trim();
+    if (!href) continue;
+    try {
+      const abs = new URL(href, baseUrl).href;
+      if (abs.startsWith('http')) out.push(abs);
+    } catch {
+      console.warn('Skipping invalid href:', href);
+    }
+  }
+  return out;
+}
+
+// helper: wait for a tab to reach “complete” status (no timeout)
+async function waitForTabComplete(tabId) {
+  return new Promise(resolve => {
+    function onUpdated(id, info) {
+      if (id === tabId && info.status === 'complete') {
+        chrome.tabs.onUpdated.removeListener(onUpdated);
+        resolve();
+      }
+    }
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+  });
+}
+
+
+
+// helper: poll for any one of a list of selectors in a frame
+async function waitForAnySelector(tabId, selectors, timeout) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (sels, to) => {
+      return new Promise((resolve, reject) => {
+        let done = false;
+        const observers = [];
+        const timer = setTimeout(() => {
+          if (!done) {
+            done = true;
+            observers.forEach(mo => mo.disconnect());
+            reject(new Error(`Timeout waiting for selectors: ${sels.join(', ')}`));
+          }
+        }, to);
+
+        function checkAll() {
+          for (const sel of sels) {
+            if (document.querySelector(sel)) {
+              return sel;
+            }
+          }
+          return null;
+        }
+
+        const first = checkAll();
+        if (first) {
+          clearTimeout(timer);
+          resolve(first);
+          return;
+        }
+
+        for (const sel of sels) {
+          const mo = new MutationObserver(() => {
+            if (done) return;
+            const found = document.querySelector(sel);
+            if (found) {
+              done = true;
+              clearTimeout(timer);
+              observers.forEach(o => o.disconnect());
+              resolve(sel);
+            }
+          });
+          mo.observe(document, { childList: true, subtree: true });
+          observers.push(mo);
+        }
+      });
+    },
+    args: [selectors, timeout]
+  });
+
+  return result;
+}
+
+// ───────────────────────────────────────────────────────────
+// Follow detail links and scrape, with solver integration (robust)
+async function followAndScrapeDetail(url, row) {
+  // Helpers
+  const isTabAlive = async (id) => {
+    try { return !!(await chrome.tabs.get(id)); }
+    catch { return true; }
+  };
+
+  const safeRemoveTab = async (id) => {
+    if (!id) return;
+    try { await chrome.tabs.remove(id); } catch {}
+  };
+
+  const SELECTORS = [
+    '.list-results-header strong',
+    '.no-results-message',
+    '.error-message'
+  ];
+
+  // 1) Ensure absolute URL
+  if (!/^https?:\/\//i.test(url)) {
+    try { url = new URL(url, config.baseUrl).href; }
+    catch { throw new Error(`[row ${row}] Invalid detail URL: ${url}`); }
+  }
+
+  let tabId = null;
+  try {
+    // 2) Backoff before opening
+    await delay(getFibDelay());
+
+    // 3) Create tab + attach network logging
+    const created = await chrome.tabs.create({ url, active: false });
+    tabId = created?.id;
+    if (!tabId) throw new Error(`[row ${row}] Failed to create detail tab`);
+    attachCfNetworkLoggingForTab(tabId);
+
+    // 4) Wait for load (with timeout + retry via handleTimeoutError)
+    try {
+      await waitForTabComplete(tabId, 45_000);
+    } catch (e) {
+      if (!(await isTabAlive(tabId))) throw new Error(`[row ${row}] No tab with id: ${tabId}`);
+      const action = await handleTimeoutError(tabId, row, { lastError: e?.message || 'waitForTabComplete timeout', heartbeat: true });
+      if (action === 'retry') {
+        await waitForTabComplete(tabId, 120_000);
+      } else {
+        throw new Error(`[row ${row}] Detail solve skipped after load wait`);
+      }
+    }
+
+    // 5) Sanity: ensure not on extension page
+    {
+      const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (active?.url?.startsWith('chrome-extension://')) {
+        throw new Error(`[row ${row}] Invalid target URL (extension context): ${active.url}`);
+      }
+    }
+
+    // 6) Backoff before probing frames
+    await delay(getFibDelay());
+    if (!(await isTabAlive(tabId))) throw new Error(`[row ${row}] No tab with id: ${tabId}`);
+
+    // 7) Probe frames for challenges
+    let mergedFlags = {
+      bodyText: false,
+      challengeForm: false,
+      cfVerify: false,
+      grecaptcha: false,
+      turnstileDiv: false,
+      challengeIframe: false
+    };
+
+    try {
+      const frameResults = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func: () => {
+          const text = document.body?.innerText || '';
+          const iframes = Array.from(document.querySelectorAll('iframe')).map(f => f.src || '');
+          return {
+            bodyText: /are you human\?/i.test(text),
+            challengeForm: !!document.querySelector('#challenge-form'),
+            cfVerify: !!document.querySelector('.cf-browser-verification'),
+            grecaptcha: !!document.querySelector('.g-recaptcha'),
+            turnstileDiv: !!document.querySelector('div[data-sitekey][class*="turnstile"]'),
+            challengeIframe: iframes.some(src =>
+              /challenges\.cloudflare\.com/i.test(src) ||
+              /\/cdn-cgi\/challenge-platform\//i.test(src)
+            )
+          };
+        }
+      });
+
+      for (const fr of frameResults) {
+        const f = fr?.result || {};
+        mergedFlags.bodyText        ||= !!f.bodyText;
+        mergedFlags.challengeForm   ||= !!f.challengeForm;
+        mergedFlags.cfVerify        ||= !!f.cfVerify;
+        mergedFlags.grecaptcha      ||= !!f.grecaptcha;
+        mergedFlags.turnstileDiv    ||= !!f.turnstileDiv;
+        mergedFlags.challengeIframe ||= !!f.challengeIframe;
+      }
+
+      console.log(`[row ${row}] Detail probe flags:`, mergedFlags);
+    } catch (err) {
+      console.warn(`[row ${row}] Frame probe failed:`, err);
+    }
+
+    // 8) Handle detected challenges
+    if (Object.values(mergedFlags).some(Boolean)) {
+      await delay(getFibDelay());
+      if (!(await isTabAlive(tabId))) throw new Error(`[row ${row}] No tab with id: ${tabId}`);
+
+      // Use existing solver flow
+      const action = await handleTimeoutError(tabId, row, { heartbeat: true });
+      if (action === 'retry') {
+        await waitForTabComplete(tabId, 120_000);
+      } else {
+        throw new Error(`[row ${row}] Detail solve skipped`);
+      }
+    }
+
+    // 9) Wait for final selectors (with timeout & retry via handleTimeoutError)
+    await delay(getFibDelay());
+    if (!(await isTabAlive(tabId))) throw new Error(`[row ${row}] No tab with id: ${tabId}`);
+
+    let waitedSel;
+    try {
+      // Prefer your existing helper if you have it:
+      // waitedSel = await waitForAnySelector(tabId, SELECTORS, 15_000);
+      // If not, do a timed wait in the page:
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (sels, timeout) => new Promise((resolve, reject) => {
+          let settled = false;
+          const observers = [];
+          const timer = setTimeout(() => {
+            if (!settled) {
+              settled = true;
+              observers.forEach(mo => mo.disconnect());
+              reject(new Error(`Timeout waiting for any selector: ${sels.join(', ')}`));
+            }
+          }, timeout);
+
+          // immediate check
+          for (const sel of sels) {
+            if (document.querySelector(sel)) {
+              settled = true;
+              clearTimeout(timer);
+              observers.forEach(mo => mo.disconnect());
+              resolve(sel);
+              return;
+            }
+          }
+
+          // observe DOM
+          sels.forEach(sel => {
+            const mo = new MutationObserver(() => {
+              const el = document.querySelector(sel);
+              if (el && !settled) {
+                settled = true;
+                clearTimeout(timer);
+                observers.forEach(mo => mo.disconnect());
+                resolve(sel);
+              }
+            });
+            mo.observe(document, { childList: true, subtree: true });
+            observers.push(mo);
+          });
+        }),
+        args: [SELECTORS, 15_000]
+      });
+      waitedSel = result;
+    } catch (e) {
+      const action = await handleTimeoutError(tabId, row, { lastError: e?.message || 'selector timeout' });
+      if (action === 'retry') {
+        await waitForTabComplete(tabId, 120_000);
+        // one more bounded wait attempt after retry
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (sels, timeout) => new Promise((resolve, reject) => {
+            let settled = false;
+            const observers = [];
+            const timer = setTimeout(() => {
+              if (!settled) {
+                settled = true;
+                observers.forEach(mo => mo.disconnect());
+                reject(new Error(`Timeout waiting for any selector: ${sels.join(', ')}`));
+              }
+            }, timeout);
+
+            for (const sel of sels) {
+              if (document.querySelector(sel)) {
+                settled = true;
+                clearTimeout(timer);
+                observers.forEach(mo => mo.disconnect());
+                resolve(sel);
+                return;
+              }
+            }
+            sels.forEach(sel => {
+              const mo = new MutationObserver(() => {
+                const el = document.querySelector(sel);
+                if (el && !settled) {
+                  settled = true;
+                  clearTimeout(timer);
+                  observers.forEach(mo => mo.disconnect());
+                  resolve(sel);
+                }
+              });
+              mo.observe(document, { childList: true, subtree: true });
+              observers.push(mo);
+            });
+          }),
+          args: [SELECTORS, 15_000]
+        });
+        waitedSel = result;
+      } else {
+        throw e;
+      }
+    }
+
+    if (waitedSel === '.no-results-message' || waitedSel === '.error-message') {
+      throw new Error(`[row ${row}] Detail page reports NO_RESULTS or ERROR`);
+    }
+
+    // 10) Backoff before extraction
+    await delay(getFibDelay());
+    if (!(await isTabAlive(tabId))) throw new Error(`[row ${row}] No tab with id: ${tabId}`);
+
+    // 11) Extract structured detail data
+    const [{ result: detailData }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: detailSelectors => {
+        const out = {};
+        for (const cfg of detailSelectors || []) {
+          const elems = Array.from(document.querySelectorAll(cfg.selector));
+          out[cfg.id] = elems.length
+            ? (cfg.multiple
+                ? elems.map(el => (el.innerText ?? '').trim())
+                : (elems[0][cfg.type === 'SelectorText' ? 'innerText' : 'innerHTML'] ?? '').trim())
+            : (cfg.multiple ? [] : null);
+        }
+        return out;
+      },
+      args: [config.detailSelectors]
+    });
+
+    return detailData;
+  } finally {
+    // Always clean up the tab to avoid leaks / “No tab with id” on next steps
+    await safeRemoveTab(tabId);
+  }
+}
+
+// ───────────────────────────────────────────────────────────
+// Log detail-page data into "For REI Upload" sheet
+async function logDetailPageData(detailData) {
+  if (
+    !detailData ||
+    typeof detailData.sourceRow !== 'number' ||
+    detailData.sourceRow < 1
+  ) {
+    throw new Error(`Invalid or missing sourceRow: ${detailData?.sourceRow}`);
+  }
+
+  const token = await getServiceAccountToken();
+  const ssId = config.spreadsheetId;
+  const detailSheet = config.detailSheetName;
+  const sourceRow = detailData.sourceRow;
+
+  // 1. Find first empty row in detailSheet (based on column A)
+  const detailRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/` +
+      `${encodeURIComponent(detailSheet)}!A:A`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  const { values: detailVals = [] } = await detailRes.json();
+  let row = 1;
+  while (
+    row <= detailVals.length &&
+    detailVals[row - 1] &&
+    detailVals[row - 1][0] !== ''
+  ) {
+    row++;
+  }
+
+  // 2. Read Site from column B in mainSheet (sourceRow)
+  const siteRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/` +
+      `${encodeURIComponent(config.sheetName)}!B${sourceRow}:B${sourceRow}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  const { values: siteVals = [] } = await siteRes.json();
+  const site = (siteVals[0] && siteVals[0][0]) || '';
+
+  // 3. Split full name into first and last
+  const full = detailData.Fullname || '';
+  const parts = full.trim().split(/\s+/);
+  const firstName = parts.shift() || '';
+  const lastName = parts.join(' ') || '';
+
+  // 4. Detect phone count (cap at 5)
+  let phoneCount = config.detailSelectors.filter(sel =>
+    /^Phone Number \d+$/.test(sel.id)
+  ).length;
+  phoneCount = Math.min(phoneCount, 5);
+
+  // 5. Collect phones & types
+  const phones = [];
+  for (let i = 1; i <= phoneCount; i++) {
+    phones.push(detailData[`Phone Number ${i}`] || '');
+    phones.push(detailData[`Phone Type ${i}`] || '');
+  }
+
+  // 6. Collect emails
+  const emailCount = config.detailSelectors.filter(sel =>
+    /^Email \d+$/.test(sel.id)
+  ).length;
+  const emails = [];
+  for (let i = 1; i <= emailCount; i++) {
+    emails.push(detailData[`Email ${i}`] || '');
+  }
+
+  // 7. Prepare row values
+  const rowVals = [site, firstName, lastName, ...phones, ...emails];
+  const lastCol = toColumnLetter(rowVals.length);
+  const range = `${encodeURIComponent(detailSheet)}!A${row}:${lastCol}${row}`;
+
+  // 8. PUT into the found empty row
+  const putRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/${range}` +
+      `?valueInputOption=RAW`,
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ values: [rowVals] }),
+    }
+  );
+
+  if (!putRes.ok) {
+    const errText = await putRes.text();
+    throw new Error(`Failed to log detail data: ${putRes.status} ${errText}`);
+  }
+
+  console.log(`✅ Logged detail-page row ${row} in "${detailSheet}"`);
+}
+
+// ───────────────────────────────────────────────────────────
+// 1. Load config.json & init ECDSA keyPair
+async function loadConfigAndKeys() {
+  const r = await fetch(chrome.runtime.getURL('config.json'));
+  config = await r.json();
+
+  const { pubJwk, privJwk } = await chrome.storage.local.get([
+    'pubJwk', 'privJwk'
+  ]);
+  if (pubJwk && privJwk) {
+    keyPair = {
+      publicKey: await crypto.subtle.importKey(
+        'jwk', pubJwk, { name:'ECDSA', namedCurve:'P-256' }, true, ['verify']
+      ),
+      privateKey: await crypto.subtle.importKey(
+        'jwk', privJwk, { name:'ECDSA', namedCurve:'P-256' }, true, ['sign']
+      )
+    };
+  } else {
+    keyPair = await genSigningKey();
+    const [ePub, ePriv] = await Promise.all([
+      crypto.subtle.exportKey('jwk', keyPair.publicKey),
+      crypto.subtle.exportKey('jwk', keyPair.privateKey)
+    ]);
+    await chrome.storage.local.set({ pubJwk: ePub, privJwk: ePriv });
+  }
+}
+
+// ───────────────────────────────────────────────────────────
+// 2. Load service-account.json and import RSA private key
+async function loadServiceAccount() {
+  const res = await fetch(chrome.runtime.getURL('service-account.json'));
+  if (!res.ok) throw new Error(`svc acct load failed: ${res.status}`);
+  const svcAcct = await res.json();
+  rsaPrivateKey = await importKeyFromPem(svcAcct.private_key, 'RSA');
+  return svcAcct;
+}
+
+// Sign JWT assertion
+async function signJwtAssertion(unsignedJwt) {
+  if (!rsaPrivateKey) {
+    throw new Error('RSA private key not loaded');
+  }
+  const signatureBuffer = await signRS256(rsaPrivateKey, unsignedJwt);
+  const sig = btoa(String.fromCharCode(...new Uint8Array(signatureBuffer)))
+    .replace(/=+$/, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+  return sig;
+}
+
+// Get Google Sheets API token
+async function getServiceAccountToken() {
+  const now = Math.floor(Date.now() / 1000);
+  if (config.tokenCache && config.tokenCache.token && config.tokenCache.expiry > now + 60) {
+    return config.tokenCache.token;
+  }
+
+  const hdr = { alg: 'RS256', typ: 'JWT' };
+  const pld = {
+    iss: serviceAccount.client_email,
+    scope: 'https://www.googleapis.com/auth/spreadsheets',
+    aud: serviceAccount.token_uri,
+    iat: now,
+    exp: now + 3600,
+  };
+  const b64 = obj =>
+    btoa(JSON.stringify(obj))
+      .replace(/=+$/, '')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_');
+
+  const unsigned = [b64(hdr), b64(pld)].join('.');
+  const signature = await signJwtAssertion(unsigned);
+  const assertion = `${unsigned}.${signature}`;
+
+  const tokRes = await fetch(serviceAccount.token_uri, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer` +
+          `&assertion=${assertion}`,
+  });
+
+  if (!tokRes.ok) {
+    throw new Error(`Token request failed: ${tokRes.status} ${await tokRes.text()}`);
+  }
+  const { access_token, expires_in } = await tokRes.json();
+  config.tokenCache = { token: access_token, expiry: now + expires_in };
+  return access_token;
+}
+
+// ───────────────────────────────────────────────────────────
+// 4. Fetch URLs & filter rows lacking U–AG data
+async function fetchUrlsFromSheet() {
+  const token = await getServiceAccountToken();
+  const { spreadsheetId, urlRange, sheetName } = config;
+
+  const urlRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/` +
+      `${encodeURIComponent(urlRange)}?majorDimension=ROWS`,
+    { headers:{ Authorization:`Bearer ${token}` } }
+  );
+  if (!urlRes.ok) throw new Error(await urlRes.text());
+  const { values=[] } = await urlRes.json();
+  if (!values.length) return [];
+
+  const startRow = +urlRange.match(/\d+/)[0];
+  const entries = values
+    .map((r, i) => ({ url: r[0]?.trim(), row: startRow + i }))
+    .filter(e => e.url);
+
+  const endRow = startRow + values.length - 1;
+  const logRange = `${sheetName}!U${startRow}:AG${endRow}`;
+  const logRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/` +
+      `${encodeURIComponent(logRange)}?majorDimension=ROWS`,
+    { headers:{ Authorization:`Bearer ${token}` } }
+  );
+  const { values: logVals=[] } = await logRes.json();
+
+  return entries.filter((e, i) => {
+    const rowLog = logVals[i] || [];
+    return !rowLog.some(cell => String(cell||'').trim());
+  });
+}
+
+// ───────────────────────────────────────────────────────────
+// 5. Fetch F–L names for fuzzy matching
+async function fetchRowNames(row) {
+  const token = await getServiceAccountToken();
+  const { spreadsheetId, sheetName } = config;
+  const range = `${sheetName}!F${row}:L${row}`;
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/` +
+      `${encodeURIComponent(range)}?majorDimension=ROWS`,
+    { headers:{ Authorization:`Bearer ${token}` } }
+  );
+  if (!res.ok) throw new Error(await res.text());
+  const { values=[] } = await res.json();
+  return (values[0]||[]).map(v => String(v||'').trim());
+}
+
+// ───────────────────────────────────────────────────────────
+// 6a. Log NO_RESULTS fallback in U→AG
+async function logResults(row, data) {
+  const token = await getServiceAccountToken();
+  const { spreadsheetId, sheetName, maxPairs } = config;
+
+  const baseDomain = "https://www.fastpeoplesearch.com";
+
+  const flat = [];
+  for (let i = 1; i <= maxPairs; i++) {
+    const person = data[`Person ${i}`] || '';
+    let href = data[`HREF ${i}`] || '';
+
+    // ✅ Prepend domain if missing and href is non-empty
+    if (href && !/^https?:\/\//i.test(href)) {
+      // Ensure no accidental double slashes
+      href = href.startsWith("/") ? `${baseDomain}${href}` : `${baseDomain}/${href}`;
+    }
+
+    flat.push(person);
+    flat.push(href);
+  }
+
+  const values = [data.Site || '', ...flat];
+  const startCol = 21; // U
+  const endCol = startCol + values.length - 1;
+  const range = `${sheetName}!${toColumnLetter(startCol)}${row}:` +
+                `${toColumnLetter(endCol)}${row}`;
+
+  await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/` +
+      `${encodeURIComponent(range)}?valueInputOption=RAW`,
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ values: [values] })
+    }
+  );
+
+  console.log(`✅ Results logged for row ${row}`);
+}
+
+// ───────────────────────────────────────────────────────────
+// 6b. Log confirmed matches in U→AG
+async function logConfirmedMatches(row, site, matches) {
+
+  const token = await getServiceAccountToken();
+  const { spreadsheetId, sheetName, maxPairs } = config;
+  let flat = matches.flatMap(m => [m.name, m.href]);
+  if (maxPairs > 0) flat = flat.slice(0, maxPairs * 2);
+
+  const values = [site, ...flat];
+  const startCol = 21;
+  const endCol = startCol + values.length - 1;
+  const range = `${sheetName}!${toColumnLetter(startCol)}${row}:` +
+                `${toColumnLetter(endCol)}${row}`;
+
+  await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/` +
+      `${encodeURIComponent(range)}?valueInputOption=RAW`,
+    {
+      method:'PUT',
+      headers:{
+        Authorization:`Bearer ${token}`,
+        'Content-Type':'application/json'
+      },
+      body: JSON.stringify({ values:[values] })
+    }
+  );
+  console.log(`✅ Logged ${matches.length} matches for row ${row}`);
+}
+
+// ───────────────────────────────────────────────────────────
+// Check if U→AG already has data
+async function hasLoggedData(row) {
+  const token = await getServiceAccountToken();
+  const { spreadsheetId, sheetName } = config;
+  const range = `${sheetName}!U${row}:AG${row}`;
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/` +
+      `${encodeURIComponent(range)}?majorDimension=ROWS`,
+    { headers:{ Authorization:`Bearer ${token}` } }
+  );
+  if (!res.ok) throw new Error(await res.text());
+  const { values=[] } = await res.json();
+  return Array.isArray(values[0]) && values[0].some(c => String(c||'').trim());
+}
+
+async function scrapeUrl({ url, row }) {
+  const { id: tabId } = await chrome.tabs.create({ url, active: false });
+  attachCfNetworkLoggingForTab(tabId);
+
+  // Wait until tab is fully loaded
+  await waitForTabComplete(tabId);
+
+  // Dynamic timeout based on page performance
+  let dynamicTimeout = 120000;
+  try {
+    const [{ result: perf }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const entries = performance.getEntriesByType('resource');
+        return entries.reduce((m, e) => Math.max(m, e.responseEnd), 0) + 20000;
+      },
+    });
+    if (typeof perf === 'number' && perf > 0) dynamicTimeout = perf;
+  } catch (_) {}
+
+  let data = {};
+  let errorMsg = null;
+
+  if (globalThis.solverLock) {
+    console.log(`[solverLock] Waiting for existing solver to complete for ${url}`);
+    await globalThis.solverLock;
+  }
+
+  for (let attempt = 1; attempt <= config.retryOptions.maxTimeoutRetries; attempt++) {
+    let res;
+    try {
+      const timeoutForAttempt =
+        attempt === config.retryOptions.maxTimeoutRetries && config.retryOptions.rescueTimeout
+          ? config.retryOptions.rescueTimeout
+          : dynamicTimeout;
+
+      const delayBeforeScript = getFibDelay();
+      console.log(`[row ${row}] Waiting ${delayBeforeScript}ms before script execution`);
+      await delay(delayBeforeScript);
+
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: async (pageSelector, selectors, maxPairs, timeout) => {
+          const waitForAny = (sels, t) =>
+            new Promise((resolve, reject) => {
+              let settled = false;
+              const observers = [];
+              const timer = setTimeout(() => {
+                if (!settled) {
+                  settled = true;
+                  observers.forEach(mo => mo.disconnect());
+                  reject(new Error(`Timeout waiting for any selector: ${sels.join(', ')}`));
+                }
+              }, t);
+
+              for (const sel of sels) {
+                if (document.querySelector(sel)) {
+                  settled = true;
+                  clearTimeout(timer);
+                  observers.forEach(mo => mo.disconnect());
+                  resolve(sel);
+                  return;
+                }
+              }
+
+              sels.forEach(sel => {
+                const mo = new MutationObserver(() => {
+                  const f = document.querySelector(sel);
+                  if (f && !settled) {
+                    settled = true;
+                    clearTimeout(timer);
+                    observers.forEach(mo => mo.disconnect());
+                    resolve(sel);
+                  }
+                });
+                mo.observe(document, { childList: true, subtree: true });
+                observers.push(mo);
+              });
+            });
+
+          const href = location.href;
+          const isBot =
+            href.includes('/bot-check') ||
+            !!document.querySelector(
+              '#challenge-form, .cf-browser-verification, .hcaptcha-box, .h-captcha, .g-recaptcha'
+            );
+          if (isBot) return { data: {}, error: 'BOT_CHECK' };
+
+          try {
+            const waitedSel = await waitForAny(
+              [pageSelector, '.no-results-message', '.error-message'],
+              timeout
+            );
+            if (['.no-results-message', '.error-message'].includes(waitedSel)) {
+              return { data: {}, error: 'NO_RESULTS' };
+            }
+
+            const out = {};
+            for (const cfg of selectors || []) {
+              const elems = Array.from(document.querySelectorAll(cfg.selector || ''));
+              if (!elems.length) {
+                out[cfg.id] = cfg.multiple ? [] : null;
+                continue;
+              }
+              const slice = cfg.maxPairs > 0 ? elems.slice(0, cfg.maxPairs) : elems;
+              if (cfg.type === 'SelectorText') {
+                out[cfg.id] = cfg.multiple ? slice.map(e => (e.innerText ?? '').trim()) : (slice[0]?.innerText ?? '').trim();
+              } else if (cfg.type === 'SelectorElementAttribute') {
+                out[cfg.id] = cfg.multiple
+                  ? slice.map(e => (e.getAttribute(cfg.extractAttribute) ?? '').trim())
+                  : (slice[0]?.getAttribute(cfg.extractAttribute) ?? '').trim();
+              } else {
+                out[cfg.id] = cfg.multiple ? slice.map(e => e.innerHTML ?? '') : (slice[0]?.innerHTML ?? '');
+              }
+            }
+            return { data: out, error: null };
+          } catch (e) {
+            return { data: {}, error: e?.message || 'UNKNOWN_SCRAPE_ERROR' };
+          }
+        },
+        args: [
+          `${config.pageLoadSelector}, .list-results-header h1, .list-results`,
+          config.selectors,
+          config.maxPairs,
+          timeoutForAttempt,
+        ],
+      });
+
+      if (!result || typeof result !== 'object') throw new Error('NULL_OR_INVALID_RESULT');
+      res = result;
+    } catch (e) {
+      errorMsg = e?.message || 'EXECUTE_SCRIPT_FAILURE';
+      console.warn(`Injection failure on attempt ${attempt}:`, errorMsg);
+
+      const retryDelay = getFibDelay();
+      console.log(`[row ${row}] Waiting ${retryDelay}ms before next attempt`);
+      await delay(retryDelay);
+
+      // Automatically trigger handleTimeoutError for selector timeouts
+      if (errorMsg.toLowerCase().includes('timeout waiting for any selector')) {
+        const action = await handleTimeoutError(tabId, row, { lastError: errorMsg });
+        if (action === 'retry') {
+          attempt--;
+          continue;
+        }
+      }
+      continue;
+    }
+
+    data = res.data || {};
+    errorMsg = res.error || null;
+
+    if (errorMsg === 'NO_RESULTS') break;
+
+    if (errorMsg === 'BOT_CHECK' || errorMsg?.toLowerCase().includes('timeout waiting for any selector')) {
+      const action = await handleTimeoutError(tabId, row, { lastError: errorMsg });
+      if (action === 'retry') {
+        attempt--;
+        continue;
+      }
+    }
+
+    if (errorMsg) {
+      console.error(`scrapeUrl error for ${url}:`, errorMsg);
+      break;
+    } else break; // success
+  }
+
+  const delayBeforeClose = getFibDelay();
+  await delay(delayBeforeClose);
+  await chrome.tabs.remove(tabId).catch(() => {});
+  if (globalThis.solverLock?.release) {
+    globalThis.solverLock.release();
+    globalThis.solverLock = null;
+    console.log(`[solverLock] Released for ${url}`);
+  }
+
+
+  const scraped = [];
+  if (Array.isArray(data.Names) && Array.isArray(data.Hrefs)) {
+    const rawLen = Math.min(data.Names.length, data.Hrefs.length);
+    const limit = config.maxPairs > 0 ? Math.min(rawLen, config.maxPairs) : rawLen;
+
+    for (let i = 0; i < limit; i++) {
+      const name = (data.Names[i] || '').trim();
+      const href = (data.Hrefs[i] || '').trim();
+      if (name && href) {
+        scraped.push({ name, href });
+      }
+    }
+  }
+
+  const seenRaw = new Set();
+  const uniqueScraped = [];
+  for (const item of scraped) {
+    const key = `${item.name}||${item.href}`;
+    if (!seenRaw.has(key)) {
+      seenRaw.add(key);
+      uniqueScraped.push(item);
+    }
+  }
+
+  const sheetNames = await fetchRowNames(row);
+  const confirmed = uniqueScraped.filter(p =>
+    sheetNames.some(sn => similarity(p.name, sn) >= config.matchThreshold)
+  );
+
+  const seenHref = new Set();
+  const uniqueConfirmed = [];
+  for (const m of confirmed) {
+    if (!seenHref.has(m.href)) {
+      seenHref.add(m.href);
+      uniqueConfirmed.push(m);
+    }
+  }
+
+  console.log(`Confirmed unique matches for row ${row}:`, uniqueConfirmed);
+
+  const siteVal = String(data.Site || url).trim();
+  await logConfirmedMatches(row, siteVal, uniqueConfirmed);
+
+  if (uniqueConfirmed.length && Array.isArray(config.detailSelectors)) {
+    const phoneKeys = config.detailSelectors
+      .filter(sel => /^Phone Number \d+$/.test(sel.id))
+      .map(sel => sel.id);
+
+    for (const m of uniqueConfirmed) {
+      // --- Fibonacci delay before following detail link ---
+      const detailDelay = getFibDelay();
+      console.log(`[row ${row}] Waiting ${detailDelay}ms before following detail link`);
+      await new Promise(r => setTimeout(r, detailDelay));
+
+      try {
+        const detailData = await followAndScrapeDetail(m.href, row);
+        const hasPhone = phoneKeys.some(key => {
+          const v = detailData[key];
+          return typeof v === 'string' && v.trim() !== '';
+        });
+
+        if (!hasPhone) {
+          console.log(`Row ${row}: no phone numbers found on detail page ${m.href}, skipping log`);
+          continue;
+        }
+        // Fibonacci Utilization
+        const logDelay = getFibDelay();
+        console.log(`[row ${row}] Waiting ${logDelay}ms before logging detailed data`)
+        await new Promise(r => setTimeout(r, logDelay));
+        await logDetailPageData({ sourceRow: row, ...detailData });
+
+      } catch (err) {
+        console.error(`Detail error for ${m.href}:`, err);
+      }
+    }
+  }
+}
+
+
+// ─────────────────────────────
+// Fibonacci-based batch pause system (no repeats per session)
+let fibBatchPool = null;         // current batch pause pool
+const usedFibBatch = new Set();  // tracks all used batch pauses globally
+
+/**
+ * Initialize or reset the Fibonacci batch pool.
+ * Optionally shuffle to randomize order.
+ */
+function initFibBatchPool() {
+  const minMs = 12_990;           // 12.990 seconds
+  const maxMs = 60_000;           // 60 seconds
+  const scale = 1000;               // scale factor for Fibonacci numbers
+
+  // Generate Fibonacci numbers until maxMs / scale
+  const fibs = [1, 1];
+  while (true) {
+    const next = fibs[fibs.length - 1] + fibs[fibs.length - 2];
+    if (next * scale > maxMs) break;
+    fibs.push(next);
+  }
+
+  // Convert to milliseconds and filter by minMs
+  fibBatchPool = fibs.map(n => n * scale).filter(n => n >= minMs);
+
+  // Shuffle for randomness
+  for (let i = fibBatchPool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [fibBatchPool[i], fibBatchPool[j]] = [fibBatchPool[j], fibBatchPool[i]];
+  }
+}
+
+/**
+ * Return a batch pause in ms.
+ * Guarantees no repeats per session, auto-resets if exhausted.
+ */
+function getBatchPauseMs() {
+  if (!fibBatchPool || fibBatchPool.length === 0) {
+    console.warn('Batch Fibonacci pool exhausted, reinitializing...');
+    initFibBatchPool();
+  }
+
+  while (fibBatchPool.length) {
+    const delay = fibBatchPool.pop();
+    if (!usedFibBatch.has(delay)) {
+      usedFibBatch.add(delay);
+      return delay;
+    }
+  }
+
+  // All batch values used, reset session history
+  console.warn('All unique batch Fibonacci pauses used, resetting session history...');
+  usedFibBatch.clear();
+  initFibBatchPool();
+  return getBatchPauseMs(); // retry after reset
+}
+
+/**
+ * Optional: manually reset batch pool and used history
+ */
+function resetBatchFibPool() {
+  fibBatchPool = null;
+  usedFibBatch.clear();
+}
+
+
+// helper: match the specific CF Turnstile headers
+function isCfTurnstileRequest(headers) {
+  return headers['origin'] === 'https://challenges.cloudflare.com'
+    && headers['referer']?.startsWith('https://challenges.cloudflare.com/cdn-cgi/challenge-platform')
+    && headers['content-length'] === '4482'
+    && headers['content-type']?.startsWith('text/plain')
+    && headers['dnt'] === '1'
+    && headers['priority'] === 'u=1, i';
+}
+
+function attachCfNetworkLoggingForTab(tabId) {
+  const filter = { urls: ["<all_urls>"], tabId };
+
+  const onBeforeSendHeaders = details => {
+    const headers = Object.fromEntries(details.requestHeaders.map(h => [h.name.toLowerCase(), h.value]));
+    if (isCfTurnstileRequest(headers)) {
+      console.log(`🌐 [CF XHR] ${details.method} ${details.url}`, headers);
+    }
+  };
+
+  const onCompleted = details => {
+    console.log(`📥 [CF XHR RESPONSE] ${details.statusCode} ${details.url}`);
+
+    // --- NEW: Detect throttling / blocking ---
+    if (details.statusCode === 429) {
+      // Too many requests → exponential backoff
+      requestQueue.setDelay(requestQueue.dynamicDelay * 2);
+      requestQueue.pause("HTTP 429 Too Many Requests");
+    } else if (details.statusCode === 403) {
+      // Forbidden (Cloudflare challenge failed)
+      requestQueue.setDelay(requestQueue.dynamicDelay * 3);
+      requestQueue.pause("HTTP 403 Forbidden");
+    }
+  };
+
+  chrome.webRequest.onBeforeSendHeaders.addListener(onBeforeSendHeaders, filter, ["requestHeaders"]);
+  chrome.webRequest.onCompleted.addListener(onCompleted, filter);
+
+  // Cleanup when tab closes
+  const cleanup = id => {
+    if (id === tabId) {
+      chrome.webRequest.onBeforeSendHeaders.removeListener(onBeforeSendHeaders);
+      chrome.webRequest.onCompleted.removeListener(onCompleted);
+      chrome.tabs.onRemoved.removeListener(cleanup);
+    }
+  };
+  chrome.tabs.onRemoved.addListener(cleanup);
+}
+
+// ───────────────────────────────────────────────────────────
+// Bootstrap: load config, service account, then process URLs
+(async () => {
+  try {
+    await loadConfigAndKeys();
+    config.serviceAccount = await loadServiceAccount();
+    serviceAccount = config.serviceAccount;
+    console.log("🚀 Config & Service Account loaded");
+
+    const tasks = await fetchUrlsFromSheet();
+    console.log(`📌 Total URLs to scrape: ${tasks.length}`);
+
+    // Process each task via the queue — NO manual delays needed anymore
+    for (const { url, row } of tasks) {
+      requestQueue.add(async () => {
+        // Safely check if row already logged
+        let alreadyLogged = false;
+        try {
+          alreadyLogged = await hasLoggedData(row);
+        } catch (err) {
+          console.warn(`  • Could not fetch logged state for row ${row}:`, err);
+        }
+        if (alreadyLogged) {
+          console.log(`  • Row ${row} already logged, skipping`);
+          return;
+        }
+
+        // Deduplicate URLs
+        const hash = await sha256Hex(url);
+        if (seen.has(hash)) {
+          console.log(`  • Duplicate ${url}, skipping`);
+          return;
+        }
+        seen.add(hash);
+
+        // Perform scrape with error handling
+        try {
+          await scrapeUrl({ url, row });
+        } catch (e) {
+          console.error(`  • scrapeUrl error for ${url}:`, e);
+        } finally {
+          try {
+            await chrome.tabs.remove(tabId);
+          } catch {}
+          await delay(10); // small cleanup pause
+        }
+      });
+    }
+
+    // Wait until queue is fully processed
+    const waitUntilDone = () =>
+      new Promise(resolve => {
+        const interval = setInterval(() => {
+          if (requestQueue.queue.length === 0 && requestQueue.activeCount === 0) {
+            clearInterval(interval);
+            resolve();
+          }
+        }, 500);
+      });
+
+    await waitUntilDone();
+    console.log("🏁 All done");
+  } catch (err) {
+    console.error("Fatal error during bootstrap:", err);
+  } finally {
+    if (globalThis.solverLock?.release) {
+      globalThis.solverLock.release();
+      globalThis.solverLock = null;
+    }
+  }
+})();
+
+const MAX_CONCURRENT_TABS = 3;
+let activeTabs = new Set();
+let queuedUrls = []; // You already have this from your scraping queue
+let paused = false;
+let globalCooldown = 0;
+
+
+
+// Start processing URLs
+async function watchdog() {
+    if (paused || globalCooldown > Date.now()) {
+        // Still cooling down, retry later
+        setTimeout(watchdog, 2000);
+        return;
+    }
+
+    // If we have capacity, spawn new tabs
+    while (activeTabs.size < MAX_CONCURRENT_TABS && queuedUrls.length > 0) {
+        const url = queuedUrls.shift();
+        spawnTab(url);
+    }
+
+    // Keep polling
+    setTimeout(watchdog, 1500);
+}
+
+// Spawn a scraping tab
+async function spawnTab(url) {
+    try {
+        const tab = await chrome.tabs.create({ url, active: false });
+        activeTabs.add(tab.id);
+
+        // Listen for completion
+        const onCompleted = async (details) => {
+            if (details.tabId === tab.id) {
+                if (details.statusCode === 429) {
+                    console.warn("🚫 429 Too Many Requests → Cooling down");
+                    globalCooldown = Date.now() + 60000; // 1 min cooldown
+                    paused = true;
+                    setTimeout(() => { paused = false; }, 60000);
+                }
+                cleanupTab(tab.id);
+            }
+        };
+
+        chrome.webRequest.onCompleted.addListener(onCompleted, { urls: [url] });
+    } catch (err) {
+        console.error("❌ Failed to spawn tab:", err);
+        cleanupTab(tab.id);
+    }
+}
+
+// Clean up closed or finished tabs
+function cleanupTab(tabId) {
+    if (activeTabs.has(tabId)) {
+        activeTabs.delete(tabId);
+        chrome.tabs.remove(tabId).catch(() => {});
+    }
+}
+
+// Handle CAPTCHA from solver.worker.js
+async function handleCaptchaSolved(tabId, token) {
+    console.log(`✅ Captcha solved for tab ${tabId}`);
+    chrome.tabs.sendMessage(tabId, { action: "injectCaptchaSolution", token });
+    // Once captcha is injected, retry loading
+    cleanupTab(tabId);
+}

@@ -1,0 +1,152 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "_id": "Address-Search_People-Links",
+  "baseUrl": "https://www.fastpeoplesearch.com",
+
+  "spreadsheetId": "1rHU_8_9toBx02wsOUTpIbwDOn_0MmLUNTjVmxTPyDhs",
+  "sheetName": "CAPE CORAL FINAL",
+  "urlRange": "CAPE CORAL FINAL!T5715:T",
+
+  "maxPairs": 0,
+  "matchThreshold": 0.51,
+  "pageLoadSelector": ".list-results-header strong",
+  
+  "requestOptions": {
+  "fibDelays": { "min": 1000, "max": 30000 },
+  "incrementMs": 100,
+  "pageLoadTimeoutMs": 120000,
+  "cooldownEvery": 8,
+  "cooldownMs": 40000
+  },
+
+  "retryOptions": {
+    "maxTimeoutRetries": 3,
+    "retryDelayMs": { "min": 2000, "max": 6000 }
+  },
+
+  "errorPatterns": {
+    "noResults": ["no results found", "no records", "nothing here", "could not find", "page not found", "404", "yikes!"],
+    "captcha": ["captcha", "recaptcha", "turnstile", "bot check", "security check"],
+    "rateLimit": ["exceeded the amount of requests allowed", "too many requests", "temporarily blocked", "rate limit", "access denied", "try again later"]
+  },
+  "rateLimit": {
+    "cooldownEvery": 8,
+    "cooldownMs": 40000
+  },
+
+  "selectors": [
+    {
+      "id": "Site",
+      "selector": ".list-results-header strong, .list-results-header h1",
+      "type": "SelectorHTML",
+      "multiple": false
+    },
+    {
+      "id": "Names",
+      "selector": "div.col-md-9 a, div.col-md-9 h3 a",
+      "type": "SelectorText",
+      "multiple": true
+    },
+    {
+      "id": "Hrefs",
+      "selector": "div.col-md-9 a, div.col-md-9 h3 a",
+      "type": "SelectorElementAttribute",
+      "extractAttribute": "href",
+      "multiple": true
+    }
+  ],
+
+  "detailSelectors": [
+    {
+      "id": "Fullname",
+      "selector": "div.col-sm-12 span.fullname",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Phone Number 1",
+      "selector": "div#phone_number_section dl:nth-of-type(1) a",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Phone Type 1",
+      "selector": "div#phone_number_section dl:nth-of-type(1) dt+dd",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Phone Number 2",
+      "selector": "div#phone_number_section dl:nth-of-type(2) a",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Phone Type 2",
+      "selector": "div#phone_number_section dl:nth-of-type(2) dt+dd",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Phone Number 3",
+      "selector": "div#phone_number_section dl:nth-of-type(3) a",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Phone Type 3",
+      "selector": "div#phone_number_section dl:nth-of-type(3) dt+dd",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Phone Number 4",
+      "selector": "div#phone_number_section dl:nth-of-type(4) a",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Phone Type 4",
+      "selector": "div#phone_number_section dl:nth-of-type(4) dt+dd",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Phone Number 5",
+      "selector": "div#phone_number_section dl:nth-of-type(5) a",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Phone Type 5",
+      "selector": "div#phone_number_section dl:nth-of-type(5) dt+dd",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Email 1",
+      "selector": "div#email_section h3:nth-of-type(1)",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Email 2",
+      "selector": "div#email_section h3:nth-of-type(2)",
+      "type": "SelectorText",
+      "multiple": false
+    },
+    {
+      "id": "Email 3",
+      "selector": "div#email_section h3:nth-of-type(3)",
+      "type": "SelectorText",
+      "multiple": false
+    }
+  ],
+
+  "detailSheetName": "For REI Upload",
+
+  "writeOptions": {
+    "mode": "append",
+    "startRange": "For REI Upload!A2"
+  }
+}
