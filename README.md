@@ -32,19 +32,35 @@ You can request auth to access from any of the ff emails:
 
 Make sure your device is atleast Windows 10 or higher. 
 The other module and extensions you need to download and install are as follows:
-(a) AutoHotKey v2:
+(A)>>> AutoHotKey v2:
 🔗 Official site: https://www.autohotkey.com/
 Choose the “Current Version” (AutoHotkey v2.x).
 Run the downloaded installer file (AutoHotkey_2.x.x_Setup.exe).
 During setup:
 Choose “Express Installation” (recommended).
 Make sure AutoHotkey v2 is selected as default (not v1).
-(b) Chrome Extension: Reload All Tabs
-You can add it to chrome directly via:
-https://chromewebstore.google.com/detail/reload-all-tabs/biidfoapgncnlhpdhjapkkbankbnnhnj?pli=1
-(c) Chrome Extension: Tab Wrangler
+(B)>>> Open VPN (by Nord VPN Express)
+For Windows
+Go to the official OpenVPN site:
+🔗 https://openvpn.net/community-downloads/
+Click “Windows 64-bit MSI installer” under the latest OpenVPN Community version (currently 2.6.x).
+Once downloaded, run the installer:
+Keep all components checked (especially OpenVPN GUI).
+Complete installation.
+After install, you’ll find OpenVPN GUI in the Start menu.
+Run it as Administrator.
+Place your .ovpn configuration files in:
+"C:\Program Files\OpenVPN\config\"
+Then right-click the tray icon → Connect.
+(B.1)>>> Download nordvpn auth credentials and TCP/UDP configuration files by logging in via: 
+https://my.nordaccount.com/login or if you dont have an account please sign up first via: 
+https://nordaccount.com/signup. 
+(C)>>> Chrome Extension: Tab Wrangler:
 You can add it to chrome directly via:
 https://chromewebstore.google.com/detail/tab-wrangler/egnjhciaieeiiohknchakcodbpgjnchh
+(D)>>> Chrome Extension: Reload All Tabs
+You can add it to chrome directly via:
+https://chromewebstore.google.com/detail/reload-all-tabs/biidfoapgncnlhpdhjapkkbankbnnhnj?pli=1
 
 
 //----------//----------//----------//----------//----------//----------//----------//----------//----------//
@@ -60,3 +76,6 @@ run cmd as Administrator: "query session %USERNAME%" (if it doesnt work for inst
 
 // next and last cmd terminal command: "tscon 2 /dest:console", or whatever numerical value is indicated under console parameter: "ID"
 
+
+
+(draft tbc)
