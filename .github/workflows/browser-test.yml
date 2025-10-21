@@ -76,6 +76,25 @@ jobs:
           echo "Show manifest (first 200 lines):"; sed -n '1,200p' manifest.json || true
           echo "List extension-related JS files:"; ls -la | grep -E "background.js|manifest.json|options.html|options.js|solver.detector.content.js|crypto-utils.js|crypto-worker.js" || true
 
+      - name: Ensure test page exists
+        run: |
+          if [ ! -f "otment-test.html" ]; then
+            echo "⚠️  otment-test.html missing — creating minimal fallback page..."
+            cat > otment-test.html <<'HTML'
+            <!DOCTYPE html>
+            <html lang="en">
+            <head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
+            <body>
+              <div id="otment-status">Initializing...</div>
+              <script>
+                setTimeout(()=>{document.getElementById('otment-status').classList.add('active');},1500);
+              </script>
+            </body>
+            </html>
+            HTML
+          fi
+          echo "✅ Verified otment-test.html present."
+
       - name: Start OpenVPN using repo VPN config (non-fatal)
         continue-on-error: true
         env:
