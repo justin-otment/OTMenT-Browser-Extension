@@ -11,15 +11,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: 🧩 Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: 🧱 Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install APT deps and enable universe
+      - name: 🧰 Install APT deps and enable universe
         run: |
           sudo apt-get update -y
           sudo apt-get install -y software-properties-common
@@ -40,45 +40,43 @@ jobs:
             iputils-ping \
             curl
 
-      - name: Setup Chrome
+      - name: 🌐 Setup Chrome
         uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: latest
           install-dependencies: true
 
-      - name: Install npm packages
+      - name: 📦 Install npm packages
         run: npm ci
 
-      - name: Ensure Puppeteer is installed
+      - name: 🧩 Ensure Puppeteer installed
         run: |
           npm install puppeteer@23 --save-dev
 
-      - name: Create artifact folders
+      - name: 🗂️ Create artifact folders
         run: |
           mkdir -p artifacts/screenshots
           mkdir -p artifacts/diagnostics
           mkdir -p artifacts/videos || true
 
-      - name: Ensure test page exists
+      - name: 🧾 Ensure test page exists
         run: |
           if [ ! -f "otment-test.html" ]; then
-            echo "⚠️  otment-test.html missing — creating minimal fallback page..."
+            echo "⚠️  otment-test.html missing — creating fallback test page..."
             cat <<'EOF' > otment-test.html
           <!DOCTYPE html>
           <html lang="en">
           <head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
           <body>
-            <div id="otment-status">Initializing...</div>
-            <script>
-              setTimeout(()=>{document.getElementById('otment-status').classList.add('active');},1500);
-            </script>
+            <h3>OTMenT Test Environment</h3>
+            <iframe id="test-frame" srcdoc="<input id='target-input' placeholder='Type here...' />" width="600" height="400"></iframe>
           </body>
           </html>
           EOF
           fi
           echo "✅ Verified otment-test.html present."
 
-      - name: Rotate and connect VPN
+      - name: 🔁 Rotate and connect VPN
         env:
           CI: true
         run: |
@@ -91,7 +89,7 @@ jobs:
           PIDFILE="/tmp/openvpn.pid"
           LOGFILE="/tmp/openvpn.log"
 
-          echo "🔍 Scanning for .ovpn configs..."
+          echo "🔍 Scanning for available .ovpn configs..."
           mapfile -t OVPN_LIST < <(find "$VPN_DIR" -maxdepth 1 -type f -name "*.ovpn" | sort)
           if [ "${#OVPN_LIST[@]}" -eq 0 ]; then
             echo "❌ No .ovpn files found in $VPN_DIR"
@@ -113,16 +111,16 @@ jobs:
               NEXT="${OVPN_LIST[0]}"
             fi
           else
-            echo "🆕 No rotation history found. Starting fresh."
+            echo "🆕 No previous rotation — starting fresh."
             NEXT="${OVPN_LIST[0]}"
           fi
 
           echo "🧭 Selected VPN config: $NEXT"
           echo "$NEXT" > "$STATE_FILE"
 
-          echo "🌐 Capturing baseline external IP..."
+          echo "🌐 Checking baseline external IP..."
           BASE_IP=$(curl -sS https://ifconfig.co || echo "unknown")
-          echo "Base external IP: $BASE_IP"
+          echo "Base IP: $BASE_IP"
 
           echo "🚀 Starting OpenVPN..."
           if grep -q "auth-user-pass" "$NEXT"; then
@@ -131,7 +129,7 @@ jobs:
             sudo nohup openvpn --config "$NEXT" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
           fi
 
-          echo "⏳ Waiting for VPN interface..."
+          echo "⏳ Waiting for VPN interface (tun0)..."
           for i in $(seq 1 60); do
             if /sbin/ip a | grep -q tun0; then
               echo "✅ tun0 active after $i seconds"
@@ -146,64 +144,65 @@ jobs:
             exit 1
           fi
 
-          echo "📡 Checking new external IP..."
+          echo "📡 Verifying new external IP..."
           VPN_IP=$(curl -sS https://ifconfig.co || echo "unknown")
           echo "VPN external IP: $VPN_IP"
 
           if [ "$VPN_IP" = "$BASE_IP" ] || [ "$VPN_IP" = "unknown" ]; then
-            echo "❌ VPN did not change IP"
+            echo "❌ VPN did not change external IP"
             tail -n 200 "$LOGFILE" || true
             exit 1
           fi
 
-          echo "✅ VPN active."
+          echo "✅ VPN active and verified."
 
-      - name: Start local static server
+      - name: 🌍 Start local static server
         run: |
           npm install -g http-server@14 || true
           nohup npx http-server -p 8080 -c-1 . > /tmp/http-server.log 2>&1 &
-          echo "Waiting for local server..."
+          echo "Starting local server..."
           for i in $(seq 1 10); do
             if curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
-              echo "✅ Test page reachable."
+              echo "✅ Local test page reachable."
               break
             fi
             sleep 1
           done
 
-      - name: Run Puppeteer orchestrator
+      - name: 🚀 Run orchestrator (Puppeteer + VPN)
         env:
           TARGET_URL: "http://127.0.0.1:8080/otment-test.html"
         run: |
-          echo "🚀 Starting Puppeteer orchestrator..."
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" node scripts/browser-automation.js
+          echo "Running orchestrator.js..."
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
         timeout-minutes: 30
 
-      - name: Verify artifacts
+      - name: 🧩 Verify artifacts
         if: always()
         run: |
-          echo "📦 Checking artifacts..."
+          echo "Checking artifacts..."
           ls -la artifacts || true
           if [ ! "$(ls -A artifacts/screenshots 2>/dev/null)" ]; then
-            echo "❌ No screenshots found."
+            echo "❌ No screenshots found!"
             exit 1
           fi
-          echo "✅ Screenshots found."
+          echo "✅ Screenshot artifacts verified."
 
-      - name: Collect diagnostics
+      - name: 🧾 Collect diagnostics
         if: always()
         run: |
           google-chrome --version || chromium --version || true
+          echo "--- Screenshot files ---"
           ls -la artifacts/screenshots || true
           [ -f /tmp/openvpn.log ] && cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
 
-      - name: Disconnect VPN
+      - name: 🔌 Disconnect VPN (cleanup)
         if: always()
         run: |
           sudo pkill -f openvpn || true
           echo "✅ VPN disconnected."
 
-      - name: Upload artifacts
+      - name: 📤 Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
