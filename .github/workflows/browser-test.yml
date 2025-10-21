@@ -1,116 +1,151 @@
-name: Browser Tests with VPN Rotation
+name: Browser tests (non-headless)
 
-on: [push, pull_request, workflow_dispatch]
+on: [push, pull_request]
 
 permissions:
   contents: read
   actions: write
 
 jobs:
-  vpn-browser:
+  browser:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout source
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2️⃣ Setup Node.js
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # 3️⃣ Install dependencies
-      - name: Install system dependencies
+      - name: Install APT deps and enable universe
         run: |
+          sudo apt-get update -y
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository -y universe
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
             xvfb \
+            libgtk-3-0 \
+            libxss1 \
+            libasound2t64 \
+            fonts-liberation \
+            libgbm-dev \
+            libnss3-dev \
+            libu2f-udev \
+            xdg-utils \
             openvpn \
             iproute2 \
             iputils-ping \
-            curl \
-            libnss3 \
-            libxss1 \
-            libgbm-dev \
-            libasound2 \
-            libgtk-3-0 \
-            fonts-liberation \
-            xdg-utils
+            curl
 
-      # 4️⃣ Setup Chrome
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: latest
           install-dependencies: true
 
-      # 5️⃣ Install npm packages (your extension & Puppeteer)
-      - name: Install Node packages
+      - name: Install npm packages
+        run: npm ci
+
+      - name: Ensure Puppeteer is installed
         run: |
-          npm ci
-          npm install puppeteer --save-dev
+          npm install puppeteer@23 --save-dev
 
-      # 6️⃣ Prepare artifacts folders
-      - name: Create artifacts folders
-        run: mkdir -p artifacts/screenshots artifacts/diagnostics artifacts/videos
+      - name: Create artifact folders
+        run: |
+          mkdir -p artifacts/screenshots
+          mkdir -p artifacts/diagnostics
+          mkdir -p artifacts/videos || true
 
-      # 7️⃣ Ensure test page exists
-      - name: Ensure test page
+      - name: Ensure test page exists
         run: |
           if [ ! -f "otment-test.html" ]; then
-            echo "⚠️  Creating fallback otment-test.html"
-            cat <<'HTML' > otment-test.html
-            <!DOCTYPE html>
-            <html lang="en">
-            <head><meta charset="UTF-8"><title>OTMenT Test</title></head>
-            <body>
-              <h2>OTMenT Test Page</h2>
-              <div id="status">Loading...</div>
-              <script>
-                setTimeout(()=>{document.getElementById('status').innerText='Active';},1500);
-              </script>
-            </body>
-            </html>
-            HTML
+            echo "⚠️  otment-test.html missing — creating minimal fallback page..."
+            cat <<'EOF' > otment-test.html
+          <!DOCTYPE html>
+          <html lang="en">
+          <head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
+          <body>
+            <div id="otment-status">Initializing...</div>
+            <script>
+              setTimeout(()=>{document.getElementById('otment-status').classList.add('active');},1500);
+            </script>
+          </body>
+          </html>
+          EOF
           fi
-          echo "✅ Test page verified."
+          echo "✅ Verified otment-test.html present."
 
-      # 8️⃣ Run VPN + Browser orchestrator
-      - name: Run VPN rotation and browser automation
+      - name: Start local static server
+        run: |
+          npm install -g http-server@14 || true
+          nohup npx http-server -p 8080 -c-1 . > /tmp/http-server.log 2>&1 &
+          echo "Started http-server; waiting..."
+          for i in $(seq 1 10); do
+            if curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
+              echo "✅ Test page reachable."
+              break
+            fi
+            sleep 1
+          done
+          if ! curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
+            echo "❌ Local test page not reachable."
+            cat /tmp/http-server.log || true
+            exit 1
+          fi
+
+      - name: Run orchestrator (VPN + Chrome automation)
         env:
           CI: true
         run: |
-          echo "🚀 Starting orchestrator.js..."
-          node scripts/orchestrator.js
-        timeout-minutes: 45
+          echo "🚀 Starting orchestrator..."
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" node scripts/orchestrator.js
+        timeout-minutes: 30
         continue-on-error: false
 
-      # 9️⃣ Run headed tests (if orchestrator exits cleanly)
-      - name: Run headed browser tests under Xvfb
-        env:
-          CI: true
-        run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
-        timeout-minutes: 30
-
-      # 🔟 Diagnostics and artifact collection
-      - name: Collect logs and diagnostics
+      - name: Verify artifacts produced
         if: always()
         run: |
-          echo "🧾 Collecting artifacts..."
-          mkdir -p artifacts/diagnostics
-          if [ -f /tmp/openvpn.log ]; then
-            cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log
-          fi
           echo "Listing artifacts:"
-          find artifacts -type f || true
+          ls -la artifacts || true
+          echo "Checking screenshots..."
+          if [ ! "$(ls -A artifacts/screenshots 2>/dev/null)" ]; then
+            echo "❌ No screenshots generated — automation may have failed."
+            mkdir -p artifacts/diagnostics
+            [ -f /tmp/openvpn.log ] && cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
+            exit 1
+          fi
+          echo "✅ Artifacts verified."
 
-      # 11️⃣ Upload artifacts to GitHub
-      - name: Upload test artifacts
+      - name: Collect diagnostics and logs
+        if: always()
+        run: |
+          google-chrome --version || chromium --version || true
+          echo "Artifacts dir:"
+          ls -la artifacts || true
+          echo "Screenshots:"
+          ls -la artifacts/screenshots || true
+          if [ -f /tmp/openvpn.log ]; then
+            tail -n 200 /tmp/openvpn.log || true
+            cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
+          fi
+          echo "VPN state:"
+          cat VPN/.vpn_state.json || echo "No state file."
+
+      - name: Disconnect VPN (cleanup)
+        if: always()
+        run: |
+          sudo pkill -f openvpn || true
+          echo "✅ VPN disconnected."
+
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vpn-browser-artifacts
-          path: artifacts/**
+          name: browser-artifacts
+          path: |
+            artifacts/diagnostics/**
+            artifacts/screenshots/**
+            artifacts/videos/**
