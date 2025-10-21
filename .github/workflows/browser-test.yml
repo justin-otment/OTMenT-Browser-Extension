@@ -11,15 +11,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🧩 Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🧱 Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: 🧰 Install APT dependencies and enable universe
+      - name: Install APT deps and enable universe
         run: |
           sudo apt-get update -y
           sudo apt-get install -y software-properties-common
@@ -39,48 +39,44 @@ jobs:
             openvpn \
             iproute2 \
             iputils-ping \
-            curl \
-            gconf-service \
-            libdrm2
+            curl
 
-      - name: 🌐 Setup Chrome
-        id: setup-chrome
+      - name: Setup Chrome
         uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: latest
           install-dependencies: true
 
-      - name: 📦 Install npm dependencies
+      - name: Install npm packages
         run: npm ci
 
-      - name: 🧩 Ensure chromedriver available
+      - name: Ensure chromedriver is available (npm)
         run: |
           ls -la node_modules/.bin || true
           node -e "console.log(require('chromedriver').path || 'chromedriver not found')"
 
-      - name: 🗂️ Create artifact folders
+      - name: Create artifact folders
         run: |
           mkdir -p artifacts/screenshots
           mkdir -p artifacts/diagnostics
           mkdir -p artifacts/videos || true
 
-      - name: 🧾 Show package.json and scripts
+      - name: Show package.json scripts
         run: |
-          echo "package.json content:"
+          echo "package.json:"
           cat package.json
-          echo "---"
-          echo "npm scripts:"
+          echo "npm run (available scripts):"
           npm run
 
-      - name: 🧭 Diagnostics - list key repo and extension files
+      - name: Diagnostics - list repo and extension files
         run: |
           echo "Working dir: $(pwd)"
-          echo "Manifest exists?"; test -f manifest.json && echo "yes" || echo "no"
-          echo "List of root files:"; ls -la
-          echo "Show first 100 lines of manifest.json:"; sed -n '1,100p' manifest.json || true
-          echo "Extension-related JS files:"; ls -la | grep -E "background.js|manifest.json|options.html|options.js|solver.detector.content.js|crypto-utils.js|crypto-worker.js" || true
+          echo "Manifest exists:"; test -f manifest.json && echo "yes" || echo "no"
+          echo "List root files:"; ls -la
+          echo "Show manifest (first 200 lines):"; sed -n '1,200p' manifest.json || true
+          echo "List extension-related JS files:"; ls -la | grep -E "background.js|manifest.json|options.html|options.js|solver.detector.content.js|crypto-utils.js|crypto-worker.js" || true
 
-      - name: 🧱 Ensure test page exists
+      - name: Ensure test page exists
         run: |
           if [ ! -f "otment-test.html" ]; then
             echo "⚠️  otment-test.html missing — creating minimal fallback page..."
@@ -90,14 +86,16 @@ jobs:
           <head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
           <body>
             <div id="otment-status">Initializing...</div>
-            <iframe id="test-frame" srcdoc="<input id='target-input' placeholder='Type here...' />" width="600" height="400"></iframe>
+            <script>
+              setTimeout(()=>{document.getElementById('otment-status').classList.add('active');},1500);
+            </script>
           </body>
           </html>
           EOF
-          fi
-          echo "✅ Verified otment-test.html present."
+                    fi
+                    echo "✅ Verified otment-test.html present."
 
-      - name: 🔁 Rotate and start OpenVPN connection
+      - name: Rotate and start OpenVPN connection
         env:
           CI: true
         run: |
@@ -148,7 +146,7 @@ jobs:
 
           echo "🌐 Capturing baseline external IP..."
           BASE_IP=$(curl -sS https://ifconfig.co || echo "unknown")
-          echo "Base IP: $BASE_IP"
+          echo "Base external IP: $BASE_IP"
 
           echo "🚀 Starting OpenVPN..."
           if grep -q "auth-user-pass" "$NEXT"; then
@@ -186,7 +184,7 @@ jobs:
           echo "Routing table:"
           /sbin/ip route | sed -n '1,30p'
 
-      - name: 🌍 Start local static server for test page
+      - name: Start local static server for test page
         run: |
           npm install -g http-server@14 || true
           nohup npx http-server -p 8080 -c-1 . > /tmp/http-server.log 2>&1 &
@@ -204,69 +202,71 @@ jobs:
             exit 1
           fi
 
-      - name: ⚙️ Export test environment variables
+      - name: Export TEST_PAGE_URL and CHROME_ARGS
         run: |
           echo "TEST_PAGE_URL=http://127.0.0.1:8080/otment-test.html" >> $GITHUB_ENV
-          CHROME_PATH=$(which google-chrome || which chromium || echo "/usr/bin/google-chrome")
-          echo "CHROME_PATH=$CHROME_PATH" >> $GITHUB_ENV
-          CHROME_ARGS="--disable-extensions-except=${PWD} --load-extension=${PWD} --no-sandbox --disable-dev-shm-usage --enable-unsafe-swiftshader --window-size=1920,1080"
+          CHROME_ARGS="--disable-extensions-except=${PWD} --load-extension=${PWD} --enable-unsafe-swiftshader --no-sandbox --disable-dev-shm-usage --window-size=1920,1080"
           echo "CHROME_ARGS=$CHROME_ARGS" >> $GITHUB_ENV
-          echo "✅ Exported environment variables."
 
-      - name: 🧠 Run headed tests under Xvfb
+      - name: Run headed tests under Xvfb
         env:
           CI: true
+          GITHUB_REF_NAME: ${{ github.ref_name }}
           TEST_PAGE_URL: ${{ env.TEST_PAGE_URL }}
-          CHROME_PATH: ${{ env.CHROME_PATH }}
           CHROME_ARGS: ${{ env.CHROME_ARGS }}
         run: |
-          echo "Launching Puppeteer / Orchestrator..."
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" timeout 120s npm run test:headed
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
         timeout-minutes: 30
         continue-on-error: false
 
-      - name: 🧩 Verify artifacts produced
+      - name: Verify artifacts produced (fail if missing)
         if: always()
         run: |
-          echo "Checking artifacts..."
+          echo "Listing artifacts:"
           ls -la artifacts || true
           if [ ! -s artifacts/extension-browser-logs.json ]; then
-            echo "⚠️  Missing extension-browser-logs.json"
+            echo "ERROR: artifacts/extension-browser-logs.json missing or empty" >&2
             mkdir -p artifacts/diagnostics
             [ -f /tmp/openvpn.log ] && cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
             exit 1
           fi
 
-      - name: 🧾 Collect diagnostics and logs
+      - name: Collect browser logs and diagnostics
         if: always()
         run: |
           google-chrome --version || chromium --version || true
-          echo "Artifacts:"; ls -la artifacts || true
-          echo "Diagnostics:"; ls -la artifacts/diagnostics || true
-          echo "Screenshots:"; ls -la artifacts/screenshots || true
-          [ -f /tmp/openvpn.log ] && cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
-          echo "VPN Log tail:"
-          tail -n 200 /tmp/openvpn.log || true
+          echo "Artifacts dir:"
+          ls -la artifacts || true
+          echo "Preview logs:"
+          sed -n '1,200p' artifacts/extension-browser-logs.json || true
+          echo "Diagnostics files:"
+          ls -la artifacts/diagnostics || true
+          echo "Screenshots:"
+          ls -la artifacts/screenshots || true
+          if [ -f /tmp/openvpn.log ]; then
+            tail -n 200 /tmp/openvpn.log || true
+            cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
+          fi
 
-      - name: 🔌 Disconnect OpenVPN (cleanup)
+      - name: Disconnect OpenVPN (cleanup)
         if: always()
         run: |
-          echo "Disconnecting VPN..."
           PIDFILE="/tmp/openvpn.pid"
           if [ -f "$PIDFILE" ]; then
-            sudo kill "$(cat "$PIDFILE")" || true
+            pid=$(cat "$PIDFILE") || true
+            [ -n "$pid" ] && sudo kill "$pid" || true
             rm -f "$PIDFILE" || true
           fi
-          sudo pkill -f openvpn || true
-          echo "✅ VPN disconnected."
+          pkill -f openvpn || true
 
-      - name: 📤 Upload artifacts
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: browser-artifacts
           path: |
             artifacts/extension-browser-logs.json
+            artifacts/extension-browser-logs-summary.json
             artifacts/diagnostics/**
             artifacts/screenshots/**
             artifacts/videos/**
