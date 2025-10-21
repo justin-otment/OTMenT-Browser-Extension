@@ -34,7 +34,11 @@ jobs:
             libgbm-dev \
             libnss3-dev \
             libu2f-udev \
-            xdg-utils
+            xdg-utils \
+            openvpn \
+            iproute2 \
+            iputils-ping \
+            curl
 
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@v1
@@ -54,6 +58,7 @@ jobs:
       - name: Create artifact folders
         run: |
           mkdir -p artifacts/screenshots
+          mkdir -p artifacts/diagnostics
           mkdir -p artifacts/videos || true
 
       - name: Show package.json scripts
@@ -71,23 +76,100 @@ jobs:
           echo "Show manifest (first 200 lines):"; sed -n '1,200p' manifest.json || true
           echo "List extension-related JS files (if present):"; ls -la | grep -E "background.js|manifest.json|options.html|options.js|solver.detector.content.js|crypto-utils.js|crypto-worker.js" || true
 
+      - name: Start OpenVPN using repo VPN config
+        env:
+          CI: true
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          OVPN="VPN/client.ovpn"
+          AUTH="VPN/auth.txt"
+          PIDFILE="/tmp/openvpn.pid"
+          LOGFILE="/tmp/openvpn.log"
+
+          if [ ! -f "$OVPN" ]; then
+            echo "OpenVPN config not found at $OVPN" >&2
+            ls -la VPN || true
+            exit 1
+          fi
+
+          # Launch openvpn as a background daemon. If config contains auth-user-pass, pass the auth file.
+          if grep -q "auth-user-pass" "$OVPN"; then
+            echo "Starting openvpn with auth file"
+            sudo nohup openvpn --config "$OVPN" --auth-user-pass "$AUTH" --daemon --writepid "$PIDFILE" --log "$LOGFILE" || true
+          else
+            echo "Starting openvpn without explicit auth file"
+            sudo nohup openvpn --config "$OVPN" --daemon --writepid "$PIDFILE" --log "$LOGFILE" || true
+          fi
+
+          # Wait up to 30s for tun0
+          echo "Waiting for VPN interface tun0..."
+          for i in $(seq 1 30); do
+            if /sbin/ip a | grep -q tun0; then
+              echo "tun0 present"
+              break
+            fi
+            sleep 1
+          done
+
+          if ! /sbin/ip a | grep -q tun0; then
+            echo "VPN interface tun0 not detected; tail openvpn log:" >&2
+            tail -n 200 "$LOGFILE" || true
+            exit 1
+          fi
+
+          echo "Routing table (partial):"
+          /sbin/ip route | sed -n '1,50p'
+          echo "External IP (via curl):"
+          curl -sS https://ifconfig.co || true
+
+      - name: Start local static server for test page
+        run: |
+          # serve repo root so otment-test.html is available at /otment-test.html
+          npm install -g http-server@14 || true
+          nohup npx http-server -p 8080 -c-1 . > /tmp/http-server.log 2>&1 &
+          echo "Started http-server, waiting for it to serve files..."
+          for i in $(seq 1 10); do
+            if curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
+              echo "test page reachable"
+              break
+            fi
+            sleep 1
+          done
+          if ! curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
+            echo "Local test page not reachable" >&2
+            cat /tmp/http-server.log || true
+            exit 1
+          fi
+
+      - name: Export TEST_PAGE_URL and CHROME_ARGS for runner
+        run: |
+          echo "TEST_PAGE_URL=http://127.0.0.1:8080/otment-test.html" >> $GITHUB_ENV
+          CHROME_ARGS="--disable-extensions-except=${PWD} --load-extension=${PWD} --enable-unsafe-swiftshader --no-sandbox --disable-dev-shm-usage --window-size=1920,1080"
+          echo "CHROME_ARGS=$CHROME_ARGS" >> $GITHUB_ENV
+
       - name: Print raw test page URL (for debugging)
         run: |
           echo "GITHUB_REPOSITORY=${GITHUB_REPOSITORY}"
           REF=${GITHUB_REF_NAME:-$(echo ${GITHUB_REF:-main} | sed -e 's@refs/heads/@@')}
           echo "Using ref: $REF"
-          echo "Raw test page URL: https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REF}/otment-test.html"
+          echo "TEST_PAGE_URL=${TEST_PAGE_URL}"
+          echo "CHROME_ARGS=${CHROME_ARGS}"
+
+      - name: Capture pre-run chrome://extensions/ (best-effort)
+        run: |
+          node -e "console.log('skip: capture will occur in run-headed-tests.js')"
 
       - name: Run headed tests under Xvfb
         env:
           CI: true
-          # expose branch/ref name for run-headed-tests.js
           GITHUB_REF_NAME: ${{ github.ref_name }}
+          TEST_PAGE_URL: ${{ env.TEST_PAGE_URL }}
+          CHROME_ARGS: ${{ env.CHROME_ARGS }}
         run: |
           # Start X virtual framebuffer and run the test script that launches Chrome in headed mode
-          # timeout ensures xvfb-run doesn't hang forever
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
-        timeout-minutes: 20
+        timeout-minutes: 30
         continue-on-error: false
 
       - name: Collect browser logs and diagnostics
@@ -99,7 +181,25 @@ jobs:
           ls -la artifacts || true
           echo "Preview browser logs (first 200 lines):"
           sed -n '1,200p' artifacts/extension-browser-logs.json || true
+          echo "List diagnostics files:"
+          ls -la artifacts/diagnostics || true
           echo "List screenshots (if any):"; ls -la artifacts/screenshots || true
+          echo "Tail OpenVPN log (if present):"
+          tail -n 200 /tmp/openvpn.log || true
+
+      - name: Disconnect OpenVPN (cleanup)
+        if: always()
+        run: |
+          PIDFILE="/tmp/openvpn.pid"
+          if [ -f "$PIDFILE" ]; then
+            pid=$(cat "$PIDFILE") || true
+            if [ -n "$pid" ]; then
+              sudo kill "$pid" || true
+              sleep 1
+            fi
+            rm -f "$PIDFILE" || true
+          fi
+          pkill -f openvpn || true
 
       - name: Upload artifacts
         if: always()
