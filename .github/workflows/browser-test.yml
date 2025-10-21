@@ -96,8 +96,7 @@ jobs:
                     echo "✅ Verified otment-test.html present."
 
 
-      - name: Start OpenVPN using repo VPN config (non-fatal)
-        continue-on-error: true
+      - name: Start and verify OpenVPN connection
         env:
           CI: true
         run: |
@@ -109,36 +108,53 @@ jobs:
           PIDFILE="/tmp/openvpn.pid"
           LOGFILE="/tmp/openvpn.log"
 
+          echo "🔍 Checking OpenVPN configuration..."
           if [ ! -f "$OVPN" ]; then
-            echo "⚠️  OpenVPN config not found at $OVPN — skipping VPN start (non-fatal)."
+            echo "❌ ERROR: OpenVPN config not found at $OVPN"
             ls -la VPN || true
-          else
-            echo "Starting OpenVPN service..."
-            if grep -q "auth-user-pass" "$OVPN"; then
-              sudo nohup openvpn --config "$OVPN" --auth-user-pass "$AUTH" --daemon --writepid "$PIDFILE" --log "$LOGFILE" || true
-            else
-              sudo nohup openvpn --config "$OVPN" --daemon --writepid "$PIDFILE" --log "$LOGFILE" || true
-            fi
-
-            echo "Waiting up to 30s for tun0..."
-            for i in $(seq 1 30); do
-              if /sbin/ip a | grep -q tun0; then
-                echo "tun0 present"
-                break
-              fi
-              sleep 1
-            done
-
-            if ! /sbin/ip a | grep -q tun0; then
-              echo "⚠️  VPN interface tun0 not detected; printing last 100 lines of OpenVPN log:"
-              tail -n 100 "$LOGFILE" || true
-            fi
-
-            echo "Routing table (partial):"
-            /sbin/ip route | sed -n '1,50p' || true
-            echo "External IP (via curl):"
-            curl -sS https://ifconfig.co || true
+            exit 1
           fi
+
+          echo "🌐 Capturing baseline external IP (pre-VPN)..."
+          BASE_IP=$(curl -sS https://ifconfig.co || echo "unknown")
+          echo "Base external IP: $BASE_IP"
+
+          echo "🚀 Starting OpenVPN..."
+          if grep -q "auth-user-pass" "$OVPN"; then
+            sudo nohup openvpn --config "$OVPN" --auth-user-pass "$AUTH" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
+          else
+            sudo nohup openvpn --config "$OVPN" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
+          fi
+
+          echo "⏳ Waiting up to 60 seconds for VPN interface (tun0)..."
+          for i in $(seq 1 60); do
+            if /sbin/ip a | grep -q tun0; then
+              echo "✅ tun0 detected at second $i"
+              break
+            fi
+            sleep 1
+          done
+
+          if ! /sbin/ip a | grep -q tun0; then
+            echo "❌ ERROR: VPN interface tun0 not detected after 60 seconds"
+            tail -n 100 "$LOGFILE" || true
+            exit 1
+          fi
+
+          echo "📡 Checking external IP after VPN activation..."
+          VPN_IP=$(curl -sS https://ifconfig.co || echo "unknown")
+          echo "VPN external IP: $VPN_IP"
+
+          if [ "$VPN_IP" = "$BASE_IP" ] || [ "$VPN_IP" = "unknown" ]; then
+            echo "❌ ERROR: External IP did not change — VPN tunnel may have failed"
+            echo "--- OpenVPN Log ---"
+            tail -n 200 "$LOGFILE" || true
+            exit 1
+          fi
+
+          echo "✅ VPN successfully activated"
+          echo "Routing table:"
+          /sbin/ip route | sed -n '1,30p'
 
       - name: Start local static server for test page
         run: |
