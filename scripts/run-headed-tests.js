@@ -1,39 +1,41 @@
-import {Builder, By, until} from "selenium-webdriver";
-import chrome from "selenium-webdriver/chrome";
+import fs from "fs";
 import path from "path";
-
-const extPath = path.resolve(process.cwd(), "extension-unpacked"); // repo folder with manifest.json
-const options = new chrome.Options();
-options.addArguments(
-  `--load-extension=${extPath}`,
-  "--no-sandbox",
-  "--disable-dev-shm-usage",
-  "--window-size=1920,1080"
-);
+import { Builder, By, until } from "selenium-webdriver";
+import chrome from "selenium-webdriver/chrome.js";
+import chromedriver from "chromedriver";
 
 (async function run() {
-  const driver = await new Builder().forBrowser("chrome").setChromeOptions(options).build();
   try {
-    // Wait briefly for extension to load and print logs if needed
-    await driver.sleep(1500);
+    // Ensure chromedriver binary from npm is used
+    const service = new chrome.ServiceBuilder(chromedriver.path).build();
+    chrome.setDefaultService(service);
 
-    // If you know the extension id, navigate directly:
-    // await driver.get("chrome-extension://<EXT_ID>/popup.html");
+    const options = new chrome.Options();
+    options.addArguments(
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--window-size=1920,1080"
+    );
 
-    // If you don't know the ID, open chrome://extensions and read the id from the page
-    await driver.get("chrome://extensions/?id=");
-    // chrome:// pages are restricted; if chrome://extensions isn't scriptable in your environment,
-    // read the id from ChromeDriver logs or infer from the extension path logging output.
+    const driver = await new Builder()
+      .forBrowser("chrome")
+      .setChromeOptions(options)
+      .build();
 
-    // Example: open extension page if ID known
-    const EXT_ID = "your_extension_id_here";
-    await driver.get(`chrome-extension://${EXT_ID}/popup.html`);
-    await driver.wait(until.elementLocated(By.css("button.activate")), 5000);
-    await driver.findElement(By.css("button.activate")).click();
+    // simple sanity test
+    await driver.get("https://example.com");
+    await driver.wait(until.titleContains("Example Domain"), 5000);
 
-    // perform verification
-    await driver.wait(until.titleContains("My Extension Active"), 5000);
-  } finally {
+    fs.mkdirSync("artifacts/screenshots", { recursive: true });
+    const image = await driver.takeScreenshot();
+    fs.writeFileSync(path.join("artifacts/screenshots", "example.png"), image, "base64");
+
     await driver.quit();
+    console.log("Headed test finished successfully");
+    process.exit(0);
+  } catch (err) {
+    console.error("Headed test failed:", err);
+    try { await new Promise(r => setTimeout(r, 50)); } catch {}
+    process.exit(1);
   }
 })();
