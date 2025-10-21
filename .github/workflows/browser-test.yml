@@ -172,6 +172,25 @@ jobs:
         timeout-minutes: 30
         continue-on-error: false
 
+      - name: Verify artifacts produced (fail if missing)
+        if: always()
+        run: |
+          echo "Listing artifacts after test run:"
+          ls -la artifacts || true
+          echo "Checking extension logs presence..."
+          if [ ! -s artifacts/extension-browser-logs.json ]; then
+            echo "ERROR: artifacts/extension-browser-logs.json missing or empty" >&2
+            echo "Printing diagnostics dir:"; ls -la artifacts/diagnostics || true
+            echo "Printing screenshots dir:"; ls -la artifacts/screenshots || true
+            # copy openvpn log if present for debugging
+            if [ -f /tmp/openvpn.log ]; then
+              mkdir -p artifacts/diagnostics
+              cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
+              echo "Copied /tmp/openvpn.log to artifacts/diagnostics/openvpn.log"
+            fi
+            exit 1
+          fi
+
       - name: Collect browser logs and diagnostics
         if: always()
         run: |
@@ -179,13 +198,24 @@ jobs:
           google-chrome --version || chromium --version || true
           echo "List artifacts directory:"
           ls -la artifacts || true
+
           echo "Preview browser logs (first 200 lines):"
           sed -n '1,200p' artifacts/extension-browser-logs.json || true
+
           echo "List diagnostics files:"
           ls -la artifacts/diagnostics || true
-          echo "List screenshots (if any):"; ls -la artifacts/screenshots || true
+
+          echo "List screenshots (if any):"
+          ls -la artifacts/screenshots || true
+
           echo "Tail OpenVPN log (if present):"
-          tail -n 200 /tmp/openvpn.log || true
+          if [ -f /tmp/openvpn.log ]; then
+            tail -n 200 /tmp/openvpn.log || true
+            mkdir -p artifacts/diagnostics
+            cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
+          else
+            echo "/tmp/openvpn.log not present"
+          fi
 
       - name: Disconnect OpenVPN (cleanup)
         if: always()
@@ -206,4 +236,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: browser-artifacts
-          path: artifacts
+          path: |
+            artifacts/extension-browser-logs.json
+            artifacts/extension-browser-logs-summary.txt
+            artifacts/diagnostics/**
+            artifacts/screenshots/**
+            artifacts/videos/**
