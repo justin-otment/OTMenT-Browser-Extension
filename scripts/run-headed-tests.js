@@ -6,24 +6,24 @@ import chromedriver from "chromedriver";
 
 (async function run() {
   try {
-    // Build a ChromeDriver service pointing to the chromedriver binary
-    const service = new chrome.ServiceBuilder(chromedriver.path).build();
+    // Create a ServiceBuilder but do NOT call .build() here
+    const serviceBuilder = new chrome.ServiceBuilder(chromedriver.path);
 
     // Chrome options for CI (headed)
     const options = new chrome.Options();
     options.addArguments(
       "--no-sandbox",
       "--disable-dev-shm-usage",
-      "--window-size=1920,1080",
-      // load unpacked extension if needed:
+      "--window-size=1920,1080"
+      // To load an unpacked extension:
       // `--load-extension=${path.resolve(process.cwd(), 'extension-unpacked')}`
     );
 
-    // Pass the service into Builder using setChromeService
+    // Pass the ServiceBuilder instance into setChromeService
     const driver = await new Builder()
       .forBrowser("chrome")
       .setChromeOptions(options)
-      .setChromeService(service)
+      .setChromeService(serviceBuilder)
       .build();
 
     // sanity navigation
