@@ -81,19 +81,19 @@ jobs:
           if [ ! -f "otment-test.html" ]; then
             echo "⚠️  otment-test.html missing — creating minimal fallback page..."
             cat <<'EOF' > otment-test.html
-<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
-<body>
-  <div id="otment-status">Initializing...</div>
-  <script>
-    setTimeout(()=>{document.getElementById('otment-status').classList.add('active');},1500);
-  </script>
-</body>
-</html>
-EOF
-          fi
-          echo "✅ Verified otment-test.html present."
+          <!DOCTYPE html>
+          <html lang="en">
+          <head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
+          <body>
+            <div id="otment-status">Initializing...</div>
+            <script>
+              setTimeout(()=>{document.getElementById('otment-status').classList.add('active');},1500);
+            </script>
+          </body>
+          </html>
+          EOF
+                    fi
+                    echo "✅ Verified otment-test.html present."
 
       - name: Rotate and start OpenVPN connection
         env:
