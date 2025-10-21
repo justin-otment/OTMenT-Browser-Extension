@@ -24,12 +24,7 @@ jobs:
           sudo apt-get install -y software-properties-common
           sudo add-apt-repository -y universe
           sudo apt-get update -y
-
-          # Diagnostic: show available ALSA/GConf providers
           apt-cache policy libasound2 libasound2t64 liboss4-salsa-asound2 || true
-          apt-cache policy libgconf-2-4 || true
-
-          # Install display dependencies and provider packages for ubuntu-24.04
           sudo apt-get install -y --no-install-recommends \
             xvfb \
             libgtk-3-0 \
@@ -50,25 +45,39 @@ jobs:
       - name: Install npm packages
         run: npm ci
 
+      - name: Ensure chromedriver is available (npm)
+        run: |
+          # chromedriver is installed as an npm dependency and exposes a binary via node_modules/.bin
+          ls -la node_modules/.bin || true
+          node -e "console.log(require('chromedriver').path || 'chromedriver not found')"
+
       - name: Create artifact folders
         run: |
           mkdir -p artifacts/screenshots
           mkdir -p artifacts/videos || true
 
+      - name: Show package.json scripts
+        run: |
+          echo "package.json:"
+          cat package.json
+          echo "npm run (available scripts):"
+          npm run
+
       - name: Run headed tests under Xvfb
         env:
           CI: true
         run: |
+          # Start X virtual framebuffer and run the test script that launches Chrome in headed mode
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Collect browser logs and diagnostics
         if: always()
         run: |
+          echo "Chrome version:"
           google-chrome --version || chromium --version || true
-          echo "APT policy summary (selected):"
-          apt-cache policy libasound2 libasound2t64 libgconf-2-4 || true
-          ls -la || true
+          echo "List artifacts directory:"
+          ls -la artifacts || true
 
       - name: Upload artifacts
         if: always()
