@@ -63,12 +63,31 @@ jobs:
           echo "npm run (available scripts):"
           npm run
 
+      - name: Diagnostics - list repo and extension files
+        run: |
+          echo "Working dir: $(pwd)"
+          echo "Manifest exists:"; test -f manifest.json && echo "yes" || echo "no"
+          echo "List root files:"; ls -la
+          echo "Show manifest (first 200 lines):"; sed -n '1,200p' manifest.json || true
+          echo "List extension-related JS files (if present):"; ls -la | grep -E "background.js|manifest.json|options.html|options.js|solver.detector.content.js|crypto-utils.js|crypto-worker.js" || true
+
+      - name: Print raw test page URL (for debugging)
+        run: |
+          echo "GITHUB_REPOSITORY=${GITHUB_REPOSITORY}"
+          REF=${GITHUB_REF_NAME:-$(echo ${GITHUB_REF:-main} | sed -e 's@refs/heads/@@')}
+          echo "Using ref: $REF"
+          echo "Raw test page URL: https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REF}/otment-test.html"
+
       - name: Run headed tests under Xvfb
         env:
           CI: true
+          # expose branch/ref name for run-headed-tests.js
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           # Start X virtual framebuffer and run the test script that launches Chrome in headed mode
+          # timeout ensures xvfb-run doesn't hang forever
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
+        timeout-minutes: 20
         continue-on-error: false
 
       - name: Collect browser logs and diagnostics
@@ -78,6 +97,9 @@ jobs:
           google-chrome --version || chromium --version || true
           echo "List artifacts directory:"
           ls -la artifacts || true
+          echo "Preview browser logs (first 200 lines):"
+          sed -n '1,200p' artifacts/extension-browser-logs.json || true
+          echo "List screenshots (if any):"; ls -la artifacts/screenshots || true
 
       - name: Upload artifacts
         if: always()
