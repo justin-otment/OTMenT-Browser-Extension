@@ -5,7 +5,8 @@
  * ✅ Connects to OpenVPN
  * ✅ Verifies new external IP
  * ✅ Launches Chrome (Puppeteer)
- * ✅ Performs scripted page interactions
+ * ✅ Waits for iframe + input to become visible
+ * ✅ Clicks input inside iframe and captures screenshot
  * ✅ Cleans up VPN tunnel
  */
 
@@ -18,12 +19,14 @@ const vpnDir = path.resolve("VPN");
 const stateFile = path.join(vpnDir, ".vpn_state.json");
 const authFile = path.join(vpnDir, "auth.txt");
 const artifactsDir = path.resolve("artifacts/diagnostics");
+const screenshotsDir = path.resolve("artifacts/screenshots");
 const testPage = "http://127.0.0.1:8080/otment-test.html";
 const publicIPUrl = "https://ifconfig.co";
 const connectTimeoutSec = 60;
 
 // ensure dirs
 fs.mkdirSync(artifactsDir, { recursive: true });
+fs.mkdirSync(screenshotsDir, { recursive: true });
 
 // === Helpers ===
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -135,33 +138,38 @@ async function runBrowserAutomation(vpnName) {
   });
 
   const page = await browser.newPage();
-  page.setDefaultTimeout(20000);
+  page.setDefaultTimeout(30000);
 
   try {
+    console.log(`🌍 Navigating to ${testPage}`);
     await page.goto(testPage, { waitUntil: "networkidle2" });
-    await sleep(2000);
 
-    // mimic your AHK "click" patterns
-    await page.mouse.click(100, 200); // x=100 y=200
+    // wait for iframe and child <input> visibility
+    console.log("⏳ Waiting for iframe to appear...");
+    await page.waitForSelector("iframe", { visible: true, timeout: 30000 });
+    const frameHandle = await page.$("iframe");
+    const frame = await frameHandle.contentFrame();
+
+    console.log("⏳ Waiting for input inside iframe...");
+    await frame.waitForSelector("input", { visible: true, timeout: 15000 });
+
+    console.log("🖱 Clicking input inside iframe...");
+    await frame.click("input");
     await sleep(1000);
-    await page.mouse.click(560, 300); // x=562 y=303 in AHK
-    await sleep(1500);
 
-    // reload 3 times like AHK
-    for (let i = 0; i < 3; i++) {
+    // capture post-click screenshot
+    const shot = path.join(screenshotsDir, `iframe-clicked-${vpnName}.png`);
+    await page.screenshot({ path: shot, fullPage: true });
+    console.log(`📸 Screenshot saved: ${shot}`);
+
+    // simulate reloads for consistency
+    for (let i = 0; i < 2; i++) {
       await page.reload({ waitUntil: "domcontentloaded" });
       await sleep(1000);
     }
 
-    // take screenshot
-    const shot = path.join(
-      "artifacts/screenshots",
-      `screenshot-${vpnName}.png`
-    );
-    await page.screenshot({ path: shot, fullPage: true });
-    console.log(`📸 Screenshot saved: ${shot}`);
   } catch (err) {
-    console.error("❌ Browser automation failed:", err);
+    console.error("❌ Browser automation failed:", err.message);
   } finally {
     await browser.close();
   }
