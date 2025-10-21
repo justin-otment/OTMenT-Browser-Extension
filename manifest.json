@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OTMenT",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Automate address lookups, solve captchas via 2Captcha, and push results into Google Sheets.",
   "permissions": [
     "scripting",
@@ -39,9 +39,22 @@
         "https://*.challenges.cloudflare.com/*",
         "https://www.google.com/recaptcha/*"
       ],
-      "js": ["solver.detector.content.js"],
+      "js": [
+        "solver.detector.content.js"
+      ],
       "run_at": "document_start",
       "all_frames": true
+    },
+    {
+      "matches": [
+        "https://raw.githubusercontent.com/*/*/*/otment-test.html",
+        "https://raw.githubusercontent.com/*/*/*/tests/otment-test.html"
+      ],
+      "js": [
+        "test-content-hook.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
     }
   ],
   "action": {
