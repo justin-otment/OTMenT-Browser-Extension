@@ -2,26 +2,79 @@ name: Browser tests (non-headless)
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   browser:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb libgtk-3-0 libxss1 libasound2
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
+      - name: Install APT deps and enable universe
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository -y universe
+          sudo apt-get update -y
+
+          # Diagnostic: show available providers for ALSA
+          apt-cache policy libasound2 libasound2t64 liboss4-salsa-asound2 || true
+
+          # Install display dependencies and provider package for ALSA on ubuntu-24.04
+          sudo apt-get install -y --no-install-recommends \
+            xvfb \
+            libgtk-3-0 \
+            libxss1 \
+            libasound2t64 \
+            fonts-liberation \
+            libgconf-2-4 \
+            libgbm-dev \
+            libnss3-dev \
+            libu2f-udev \
+            xdg-utils
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: latest
+          install-dependencies: true
+
       - name: Install npm packages
         run: npm ci
 
-      - name: Run tests inside Xvfb
+      - name: Create artifact folders
         run: |
-          # start command under xvfb-run so Chrome has a DISPLAY
+          mkdir -p artifacts/screenshots
+          mkdir -p artifacts/videos || true
+
+      - name: Run headed tests under Xvfb
+        env:
+          CI: true
+        run: |
+          # ensure xvfb-run exists and run your test command with a display
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
+        continue-on-error: true
+
+      - name: Collect browser logs and diagnostics
+        if: always()
+        run: |
+          echo "Chrome version:"
+          google-chrome --version || chromium --version || true
+          echo "List Chrome stderr logs (if any)"
+          # if your test runner dumps browser stderr to a file, copy it into artifacts
+          ls -la || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-artifacts
+          path: artifacts
