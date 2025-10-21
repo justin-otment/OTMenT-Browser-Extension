@@ -81,55 +81,84 @@ jobs:
           if [ ! -f "otment-test.html" ]; then
             echo "⚠️  otment-test.html missing — creating minimal fallback page..."
             cat <<'EOF' > otment-test.html
-          <!DOCTYPE html>
-          <html lang="en">
-          <head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
-          <body>
-            <div id="otment-status">Initializing...</div>
-            <script>
-              setTimeout(()=>{document.getElementById('otment-status').classList.add('active');},1500);
-            </script>
-          </body>
-          </html>
-          EOF
-                    fi
-                    echo "✅ Verified otment-test.html present."
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
+<body>
+  <div id="otment-status">Initializing...</div>
+  <script>
+    setTimeout(()=>{document.getElementById('otment-status').classList.add('active');},1500);
+  </script>
+</body>
+</html>
+EOF
+          fi
+          echo "✅ Verified otment-test.html present."
 
-
-      - name: Start and verify OpenVPN connection
+      - name: Rotate and start OpenVPN connection
         env:
           CI: true
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
 
-          OVPN="VPN/client.ovpn"
-          AUTH="VPN/auth.txt"
+          VPN_DIR="VPN"
+          AUTH_FILE="$VPN_DIR/auth.txt"
+          STATE_FILE="$VPN_DIR/rotation_state.txt"
           PIDFILE="/tmp/openvpn.pid"
           LOGFILE="/tmp/openvpn.log"
 
-          echo "🔍 Checking OpenVPN configuration..."
-          if [ ! -f "$OVPN" ]; then
-            echo "❌ ERROR: OpenVPN config not found at $OVPN"
-            ls -la VPN || true
+          echo "🔍 Scanning for available .ovpn configs..."
+          mapfile -t OVPN_LIST < <(find "$VPN_DIR" -maxdepth 1 -type f -name "*.ovpn" | sort)
+          if [ "${#OVPN_LIST[@]}" -eq 0 ]; then
+            echo "❌ ERROR: No .ovpn files found in $VPN_DIR"
+            ls -la "$VPN_DIR" || true
+            exit 1
+          fi
+          echo "📦 Found ${#OVPN_LIST[@]} configs."
+
+          if [ ! -f "$AUTH_FILE" ]; then
+            echo "❌ ERROR: Missing $AUTH_FILE"
             exit 1
           fi
 
-          echo "🌐 Capturing baseline external IP (pre-VPN)..."
+          if [ -f "$STATE_FILE" ]; then
+            LAST_USED=$(cat "$STATE_FILE" || true)
+            echo "🕹 Last used config: $LAST_USED"
+            NEXT=""
+            for ((i = 0; i < ${#OVPN_LIST[@]}; i++)); do
+              if [[ "${OVPN_LIST[$i]}" == "$LAST_USED" ]]; then
+                NEXT_INDEX=$(( (i + 1) % ${#OVPN_LIST[@]} ))
+                NEXT="${OVPN_LIST[$NEXT_INDEX]}"
+                break
+              fi
+            done
+            if [ -z "$NEXT" ]; then
+              NEXT="${OVPN_LIST[0]}"
+            fi
+          else
+            echo "🆕 No rotation history found. Starting fresh."
+            NEXT="${OVPN_LIST[0]}"
+          fi
+
+          echo "🧭 Selected VPN config: $NEXT"
+          echo "$NEXT" > "$STATE_FILE"
+
+          echo "🌐 Capturing baseline external IP..."
           BASE_IP=$(curl -sS https://ifconfig.co || echo "unknown")
           echo "Base external IP: $BASE_IP"
 
           echo "🚀 Starting OpenVPN..."
-          if grep -q "auth-user-pass" "$OVPN"; then
-            sudo nohup openvpn --config "$OVPN" --auth-user-pass "$AUTH" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
+          if grep -q "auth-user-pass" "$NEXT"; then
+            sudo nohup openvpn --config "$NEXT" --auth-user-pass "$AUTH_FILE" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
           else
-            sudo nohup openvpn --config "$OVPN" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
+            sudo nohup openvpn --config "$NEXT" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
           fi
 
           echo "⏳ Waiting up to 60 seconds for VPN interface (tun0)..."
           for i in $(seq 1 60); do
             if /sbin/ip a | grep -q tun0; then
-              echo "✅ tun0 detected at second $i"
+              echo "✅ tun0 detected after $i seconds"
               break
             fi
             sleep 1
@@ -146,8 +175,7 @@ jobs:
           echo "VPN external IP: $VPN_IP"
 
           if [ "$VPN_IP" = "$BASE_IP" ] || [ "$VPN_IP" = "unknown" ]; then
-            echo "❌ ERROR: External IP did not change — VPN tunnel may have failed"
-            echo "--- OpenVPN Log ---"
+            echo "❌ ERROR: External IP did not change — VPN may have failed"
             tail -n 200 "$LOGFILE" || true
             exit 1
           fi
@@ -180,18 +208,6 @@ jobs:
           CHROME_ARGS="--disable-extensions-except=${PWD} --load-extension=${PWD} --enable-unsafe-swiftshader --no-sandbox --disable-dev-shm-usage --window-size=1920,1080"
           echo "CHROME_ARGS=$CHROME_ARGS" >> $GITHUB_ENV
 
-      - name: Print raw test page URL (for debugging)
-        run: |
-          echo "Repo: ${GITHUB_REPOSITORY}"
-          REF=${GITHUB_REF_NAME:-$(echo ${GITHUB_REF:-main} | sed -e 's@refs/heads/@@')}
-          echo "Using ref: $REF"
-          echo "TEST_PAGE_URL=${TEST_PAGE_URL}"
-          echo "CHROME_ARGS=${CHROME_ARGS}"
-
-      - name: Capture pre-run chrome://extensions/ (placeholder)
-        run: |
-          node -e "console.log('skip: capture occurs inside run-headed-tests.js')"
-
       - name: Run headed tests under Xvfb
         env:
           CI: true
@@ -208,7 +224,6 @@ jobs:
         run: |
           echo "Listing artifacts:"
           ls -la artifacts || true
-          echo "Checking extension-browser-logs.json..."
           if [ ! -s artifacts/extension-browser-logs.json ]; then
             echo "ERROR: artifacts/extension-browser-logs.json missing or empty" >&2
             mkdir -p artifacts/diagnostics
