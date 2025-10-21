@@ -78,11 +78,91 @@ jobs:
           fi
           echo "✅ Verified otment-test.html present."
 
+      - name: Rotate and connect VPN
+        env:
+          CI: true
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+
+          VPN_DIR="VPN"
+          AUTH_FILE="$VPN_DIR/auth.txt"
+          STATE_FILE="$VPN_DIR/rotation_state.txt"
+          PIDFILE="/tmp/openvpn.pid"
+          LOGFILE="/tmp/openvpn.log"
+
+          echo "🔍 Scanning for .ovpn configs..."
+          mapfile -t OVPN_LIST < <(find "$VPN_DIR" -maxdepth 1 -type f -name "*.ovpn" | sort)
+          if [ "${#OVPN_LIST[@]}" -eq 0 ]; then
+            echo "❌ No .ovpn files found in $VPN_DIR"
+            exit 1
+          fi
+
+          if [ -f "$STATE_FILE" ]; then
+            LAST_USED=$(cat "$STATE_FILE" || true)
+            echo "🕹 Last used config: $LAST_USED"
+            NEXT=""
+            for ((i = 0; i < ${#OVPN_LIST[@]}; i++)); do
+              if [[ "${OVPN_LIST[$i]}" == "$LAST_USED" ]]; then
+                NEXT_INDEX=$(( (i + 1) % ${#OVPN_LIST[@]} ))
+                NEXT="${OVPN_LIST[$NEXT_INDEX]}"
+                break
+              fi
+            done
+            if [ -z "$NEXT" ]; then
+              NEXT="${OVPN_LIST[0]}"
+            fi
+          else
+            echo "🆕 No rotation history found. Starting fresh."
+            NEXT="${OVPN_LIST[0]}"
+          fi
+
+          echo "🧭 Selected VPN config: $NEXT"
+          echo "$NEXT" > "$STATE_FILE"
+
+          echo "🌐 Capturing baseline external IP..."
+          BASE_IP=$(curl -sS https://ifconfig.co || echo "unknown")
+          echo "Base external IP: $BASE_IP"
+
+          echo "🚀 Starting OpenVPN..."
+          if grep -q "auth-user-pass" "$NEXT"; then
+            sudo nohup openvpn --config "$NEXT" --auth-user-pass "$AUTH_FILE" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
+          else
+            sudo nohup openvpn --config "$NEXT" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
+          fi
+
+          echo "⏳ Waiting for VPN interface..."
+          for i in $(seq 1 60); do
+            if /sbin/ip a | grep -q tun0; then
+              echo "✅ tun0 active after $i seconds"
+              break
+            fi
+            sleep 1
+          done
+
+          if ! /sbin/ip a | grep -q tun0; then
+            echo "❌ VPN interface not detected after 60s"
+            tail -n 100 "$LOGFILE" || true
+            exit 1
+          fi
+
+          echo "📡 Checking new external IP..."
+          VPN_IP=$(curl -sS https://ifconfig.co || echo "unknown")
+          echo "VPN external IP: $VPN_IP"
+
+          if [ "$VPN_IP" = "$BASE_IP" ] || [ "$VPN_IP" = "unknown" ]; then
+            echo "❌ VPN did not change IP"
+            tail -n 200 "$LOGFILE" || true
+            exit 1
+          fi
+
+          echo "✅ VPN active."
+
       - name: Start local static server
         run: |
           npm install -g http-server@14 || true
           nohup npx http-server -p 8080 -c-1 . > /tmp/http-server.log 2>&1 &
-          echo "Started http-server; waiting..."
+          echo "Waiting for local server..."
           for i in $(seq 1 10); do
             if curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
               echo "✅ Test page reachable."
@@ -90,51 +170,34 @@ jobs:
             fi
             sleep 1
           done
-          if ! curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
-            echo "❌ Local test page not reachable."
-            cat /tmp/http-server.log || true
-            exit 1
-          fi
 
-      - name: Run orchestrator (VPN + Chrome automation)
+      - name: Run Puppeteer orchestrator
         env:
-          CI: true
+          TARGET_URL: "http://127.0.0.1:8080/otment-test.html"
         run: |
-          echo "🚀 Starting orchestrator..."
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" node scripts/orchestrator.js
+          echo "🚀 Starting Puppeteer orchestrator..."
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" node scripts/browser-automation.js
         timeout-minutes: 30
-        continue-on-error: false
 
-      - name: Verify artifacts produced
+      - name: Verify artifacts
         if: always()
         run: |
-          echo "Listing artifacts:"
+          echo "📦 Checking artifacts..."
           ls -la artifacts || true
-          echo "Checking screenshots..."
           if [ ! "$(ls -A artifacts/screenshots 2>/dev/null)" ]; then
-            echo "❌ No screenshots generated — automation may have failed."
-            mkdir -p artifacts/diagnostics
-            [ -f /tmp/openvpn.log ] && cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
+            echo "❌ No screenshots found."
             exit 1
           fi
-          echo "✅ Artifacts verified."
+          echo "✅ Screenshots found."
 
-      - name: Collect diagnostics and logs
+      - name: Collect diagnostics
         if: always()
         run: |
           google-chrome --version || chromium --version || true
-          echo "Artifacts dir:"
-          ls -la artifacts || true
-          echo "Screenshots:"
           ls -la artifacts/screenshots || true
-          if [ -f /tmp/openvpn.log ]; then
-            tail -n 200 /tmp/openvpn.log || true
-            cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
-          fi
-          echo "VPN state:"
-          cat VPN/.vpn_state.json || echo "No state file."
+          [ -f /tmp/openvpn.log ] && cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
 
-      - name: Disconnect VPN (cleanup)
+      - name: Disconnect VPN
         if: always()
         run: |
           sudo pkill -f openvpn || true
