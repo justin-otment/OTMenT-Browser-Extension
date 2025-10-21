@@ -1,272 +1,116 @@
-name: Browser tests (non-headless)
+name: Browser Tests with VPN Rotation
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 permissions:
   contents: read
   actions: write
 
 jobs:
-  browser:
+  vpn-browser:
     runs-on: ubuntu-latest
 
     steps:
+      # 1️⃣ Checkout source
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 2️⃣ Setup Node.js
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install APT deps and enable universe
+      # 3️⃣ Install dependencies
+      - name: Install system dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y software-properties-common
-          sudo add-apt-repository -y universe
-          sudo apt-get update -y
-          apt-cache policy libasound2 libasound2t64 liboss4-salsa-asound2 || true
           sudo apt-get install -y --no-install-recommends \
             xvfb \
-            libgtk-3-0 \
-            libxss1 \
-            libasound2t64 \
-            fonts-liberation \
-            libgbm-dev \
-            libnss3-dev \
-            libu2f-udev \
-            xdg-utils \
             openvpn \
             iproute2 \
             iputils-ping \
-            curl
+            curl \
+            libnss3 \
+            libxss1 \
+            libgbm-dev \
+            libasound2 \
+            libgtk-3-0 \
+            fonts-liberation \
+            xdg-utils
 
+      # 4️⃣ Setup Chrome
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: latest
           install-dependencies: true
 
-      - name: Install npm packages
-        run: npm ci
-
-      - name: Ensure chromedriver is available (npm)
+      # 5️⃣ Install npm packages (your extension & Puppeteer)
+      - name: Install Node packages
         run: |
-          ls -la node_modules/.bin || true
-          node -e "console.log(require('chromedriver').path || 'chromedriver not found')"
+          npm ci
+          npm install puppeteer --save-dev
 
-      - name: Create artifact folders
-        run: |
-          mkdir -p artifacts/screenshots
-          mkdir -p artifacts/diagnostics
-          mkdir -p artifacts/videos || true
+      # 6️⃣ Prepare artifacts folders
+      - name: Create artifacts folders
+        run: mkdir -p artifacts/screenshots artifacts/diagnostics artifacts/videos
 
-      - name: Show package.json scripts
-        run: |
-          echo "package.json:"
-          cat package.json
-          echo "npm run (available scripts):"
-          npm run
-
-      - name: Diagnostics - list repo and extension files
-        run: |
-          echo "Working dir: $(pwd)"
-          echo "Manifest exists:"; test -f manifest.json && echo "yes" || echo "no"
-          echo "List root files:"; ls -la
-          echo "Show manifest (first 200 lines):"; sed -n '1,200p' manifest.json || true
-          echo "List extension-related JS files:"; ls -la | grep -E "background.js|manifest.json|options.html|options.js|solver.detector.content.js|crypto-utils.js|crypto-worker.js" || true
-
-      - name: Ensure test page exists
+      # 7️⃣ Ensure test page exists
+      - name: Ensure test page
         run: |
           if [ ! -f "otment-test.html" ]; then
-            echo "⚠️  otment-test.html missing — creating minimal fallback page..."
-            cat <<'EOF' > otment-test.html
-          <!DOCTYPE html>
-          <html lang="en">
-          <head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
-          <body>
-            <div id="otment-status">Initializing...</div>
-            <script>
-              setTimeout(()=>{document.getElementById('otment-status').classList.add('active');},1500);
-            </script>
-          </body>
-          </html>
-          EOF
-                    fi
-                    echo "✅ Verified otment-test.html present."
+            echo "⚠️  Creating fallback otment-test.html"
+            cat <<'HTML' > otment-test.html
+            <!DOCTYPE html>
+            <html lang="en">
+            <head><meta charset="UTF-8"><title>OTMenT Test</title></head>
+            <body>
+              <h2>OTMenT Test Page</h2>
+              <div id="status">Loading...</div>
+              <script>
+                setTimeout(()=>{document.getElementById('status').innerText='Active';},1500);
+              </script>
+            </body>
+            </html>
+            HTML
+          fi
+          echo "✅ Test page verified."
 
-      - name: Rotate and start OpenVPN connection
+      # 8️⃣ Run VPN + Browser orchestrator
+      - name: Run VPN rotation and browser automation
         env:
           CI: true
         run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
+          echo "🚀 Starting orchestrator.js..."
+          node scripts/orchestrator.js
+        timeout-minutes: 45
+        continue-on-error: false
 
-          VPN_DIR="VPN"
-          AUTH_FILE="$VPN_DIR/auth.txt"
-          STATE_FILE="$VPN_DIR/rotation_state.txt"
-          PIDFILE="/tmp/openvpn.pid"
-          LOGFILE="/tmp/openvpn.log"
-
-          echo "🔍 Scanning for available .ovpn configs..."
-          mapfile -t OVPN_LIST < <(find "$VPN_DIR" -maxdepth 1 -type f -name "*.ovpn" | sort)
-          if [ "${#OVPN_LIST[@]}" -eq 0 ]; then
-            echo "❌ ERROR: No .ovpn files found in $VPN_DIR"
-            ls -la "$VPN_DIR" || true
-            exit 1
-          fi
-          echo "📦 Found ${#OVPN_LIST[@]} configs."
-
-          if [ ! -f "$AUTH_FILE" ]; then
-            echo "❌ ERROR: Missing $AUTH_FILE"
-            exit 1
-          fi
-
-          if [ -f "$STATE_FILE" ]; then
-            LAST_USED=$(cat "$STATE_FILE" || true)
-            echo "🕹 Last used config: $LAST_USED"
-            NEXT=""
-            for ((i = 0; i < ${#OVPN_LIST[@]}; i++)); do
-              if [[ "${OVPN_LIST[$i]}" == "$LAST_USED" ]]; then
-                NEXT_INDEX=$(( (i + 1) % ${#OVPN_LIST[@]} ))
-                NEXT="${OVPN_LIST[$NEXT_INDEX]}"
-                break
-              fi
-            done
-            if [ -z "$NEXT" ]; then
-              NEXT="${OVPN_LIST[0]}"
-            fi
-          else
-            echo "🆕 No rotation history found. Starting fresh."
-            NEXT="${OVPN_LIST[0]}"
-          fi
-
-          echo "🧭 Selected VPN config: $NEXT"
-          echo "$NEXT" > "$STATE_FILE"
-
-          echo "🌐 Capturing baseline external IP..."
-          BASE_IP=$(curl -sS https://ifconfig.co || echo "unknown")
-          echo "Base external IP: $BASE_IP"
-
-          echo "🚀 Starting OpenVPN..."
-          if grep -q "auth-user-pass" "$NEXT"; then
-            sudo nohup openvpn --config "$NEXT" --auth-user-pass "$AUTH_FILE" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
-          else
-            sudo nohup openvpn --config "$NEXT" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
-          fi
-
-          echo "⏳ Waiting up to 60 seconds for VPN interface (tun0)..."
-          for i in $(seq 1 60); do
-            if /sbin/ip a | grep -q tun0; then
-              echo "✅ tun0 detected after $i seconds"
-              break
-            fi
-            sleep 1
-          done
-
-          if ! /sbin/ip a | grep -q tun0; then
-            echo "❌ ERROR: VPN interface tun0 not detected after 60 seconds"
-            tail -n 100 "$LOGFILE" || true
-            exit 1
-          fi
-
-          echo "📡 Checking external IP after VPN activation..."
-          VPN_IP=$(curl -sS https://ifconfig.co || echo "unknown")
-          echo "VPN external IP: $VPN_IP"
-
-          if [ "$VPN_IP" = "$BASE_IP" ] || [ "$VPN_IP" = "unknown" ]; then
-            echo "❌ ERROR: External IP did not change — VPN may have failed"
-            tail -n 200 "$LOGFILE" || true
-            exit 1
-          fi
-
-          echo "✅ VPN successfully activated"
-          echo "Routing table:"
-          /sbin/ip route | sed -n '1,30p'
-
-      - name: Start local static server for test page
-        run: |
-          npm install -g http-server@14 || true
-          nohup npx http-server -p 8080 -c-1 . > /tmp/http-server.log 2>&1 &
-          echo "Started http-server; waiting..."
-          for i in $(seq 1 10); do
-            if curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
-              echo "✅ Test page reachable."
-              break
-            fi
-            sleep 1
-          done
-          if ! curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
-            echo "❌ Local test page not reachable."
-            cat /tmp/http-server.log || true
-            exit 1
-          fi
-
-      - name: Export TEST_PAGE_URL and CHROME_ARGS
-        run: |
-          echo "TEST_PAGE_URL=http://127.0.0.1:8080/otment-test.html" >> $GITHUB_ENV
-          CHROME_ARGS="--disable-extensions-except=${PWD} --load-extension=${PWD} --enable-unsafe-swiftshader --no-sandbox --disable-dev-shm-usage --window-size=1920,1080"
-          echo "CHROME_ARGS=$CHROME_ARGS" >> $GITHUB_ENV
-
-      - name: Run headed tests under Xvfb
+      # 9️⃣ Run headed tests (if orchestrator exits cleanly)
+      - name: Run headed browser tests under Xvfb
         env:
           CI: true
-          GITHUB_REF_NAME: ${{ github.ref_name }}
-          TEST_PAGE_URL: ${{ env.TEST_PAGE_URL }}
-          CHROME_ARGS: ${{ env.CHROME_ARGS }}
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
         timeout-minutes: 30
-        continue-on-error: false
 
-      - name: Verify artifacts produced (fail if missing)
+      # 🔟 Diagnostics and artifact collection
+      - name: Collect logs and diagnostics
         if: always()
         run: |
-          echo "Listing artifacts:"
-          ls -la artifacts || true
-          if [ ! -s artifacts/extension-browser-logs.json ]; then
-            echo "ERROR: artifacts/extension-browser-logs.json missing or empty" >&2
-            mkdir -p artifacts/diagnostics
-            [ -f /tmp/openvpn.log ] && cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
-            exit 1
-          fi
-
-      - name: Collect browser logs and diagnostics
-        if: always()
-        run: |
-          google-chrome --version || chromium --version || true
-          echo "Artifacts dir:"
-          ls -la artifacts || true
-          echo "Preview logs:"
-          sed -n '1,200p' artifacts/extension-browser-logs.json || true
-          echo "Diagnostics files:"
-          ls -la artifacts/diagnostics || true
-          echo "Screenshots:"
-          ls -la artifacts/screenshots || true
+          echo "🧾 Collecting artifacts..."
+          mkdir -p artifacts/diagnostics
           if [ -f /tmp/openvpn.log ]; then
-            tail -n 200 /tmp/openvpn.log || true
-            cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
+            cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log
           fi
+          echo "Listing artifacts:"
+          find artifacts -type f || true
 
-      - name: Disconnect OpenVPN (cleanup)
-        if: always()
-        run: |
-          PIDFILE="/tmp/openvpn.pid"
-          if [ -f "$PIDFILE" ]; then
-            pid=$(cat "$PIDFILE") || true
-            [ -n "$pid" ] && sudo kill "$pid" || true
-            rm -f "$PIDFILE" || true
-          fi
-          pkill -f openvpn || true
-
-      - name: Upload artifacts
+      # 11️⃣ Upload artifacts to GitHub
+      - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-artifacts
-          path: |
-            artifacts/extension-browser-logs.json
-            artifacts/extension-browser-logs-summary.json
-            artifacts/diagnostics/**
-            artifacts/screenshots/**
-            artifacts/videos/**
+          name: vpn-browser-artifacts
+          path: artifacts/**
