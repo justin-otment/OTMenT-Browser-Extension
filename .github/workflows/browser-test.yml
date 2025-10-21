@@ -1,0 +1,27 @@
+name: Browser tests (non-headless)
+
+on: [push, pull_request]
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgtk-3-0 libxss1 libasound2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install npm packages
+        run: npm ci
+
+      - name: Run tests inside Xvfb
+        run: |
+          # start command under xvfb-run so Chrome has a DISPLAY
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
