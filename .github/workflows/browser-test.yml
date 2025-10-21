@@ -9,6 +9,7 @@ permissions:
 jobs:
   browser:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -51,7 +52,6 @@ jobs:
 
       - name: Ensure chromedriver is available (npm)
         run: |
-          # chromedriver is installed as an npm dependency and exposes a binary via node_modules/.bin
           ls -la node_modules/.bin || true
           node -e "console.log(require('chromedriver').path || 'chromedriver not found')"
 
@@ -74,75 +74,71 @@ jobs:
           echo "Manifest exists:"; test -f manifest.json && echo "yes" || echo "no"
           echo "List root files:"; ls -la
           echo "Show manifest (first 200 lines):"; sed -n '1,200p' manifest.json || true
-          echo "List extension-related JS files (if present):"; ls -la | grep -E "background.js|manifest.json|options.html|options.js|solver.detector.content.js|crypto-utils.js|crypto-worker.js" || true
+          echo "List extension-related JS files:"; ls -la | grep -E "background.js|manifest.json|options.html|options.js|solver.detector.content.js|crypto-utils.js|crypto-worker.js" || true
 
-      - name: Start OpenVPN using repo VPN config
+      - name: Start OpenVPN using repo VPN config (non-fatal)
+        continue-on-error: true
         env:
           CI: true
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
+
           OVPN="VPN/client.ovpn"
           AUTH="VPN/auth.txt"
           PIDFILE="/tmp/openvpn.pid"
           LOGFILE="/tmp/openvpn.log"
 
           if [ ! -f "$OVPN" ]; then
-            echo "OpenVPN config not found at $OVPN" >&2
+            echo "⚠️  OpenVPN config not found at $OVPN — skipping VPN start (non-fatal)."
             ls -la VPN || true
-            exit 1
-          fi
-
-          # Launch openvpn as a background daemon. If config contains auth-user-pass, pass the auth file.
-          if grep -q "auth-user-pass" "$OVPN"; then
-            echo "Starting openvpn with auth file"
-            sudo nohup openvpn --config "$OVPN" --auth-user-pass "$AUTH" --daemon --writepid "$PIDFILE" --log "$LOGFILE" || true
           else
-            echo "Starting openvpn without explicit auth file"
-            sudo nohup openvpn --config "$OVPN" --daemon --writepid "$PIDFILE" --log "$LOGFILE" || true
-          fi
-
-          # Wait up to 30s for tun0
-          echo "Waiting for VPN interface tun0..."
-          for i in $(seq 1 30); do
-            if /sbin/ip a | grep -q tun0; then
-              echo "tun0 present"
-              break
+            echo "Starting OpenVPN service..."
+            if grep -q "auth-user-pass" "$OVPN"; then
+              sudo nohup openvpn --config "$OVPN" --auth-user-pass "$AUTH" --daemon --writepid "$PIDFILE" --log "$LOGFILE" || true
+            else
+              sudo nohup openvpn --config "$OVPN" --daemon --writepid "$PIDFILE" --log "$LOGFILE" || true
             fi
-            sleep 1
-          done
 
-          if ! /sbin/ip a | grep -q tun0; then
-            echo "VPN interface tun0 not detected; tail openvpn log:" >&2
-            tail -n 200 "$LOGFILE" || true
-            exit 1
+            echo "Waiting up to 30s for tun0..."
+            for i in $(seq 1 30); do
+              if /sbin/ip a | grep -q tun0; then
+                echo "tun0 present"
+                break
+              fi
+              sleep 1
+            done
+
+            if ! /sbin/ip a | grep -q tun0; then
+              echo "⚠️  VPN interface tun0 not detected; printing last 100 lines of OpenVPN log:"
+              tail -n 100 "$LOGFILE" || true
+            fi
+
+            echo "Routing table (partial):"
+            /sbin/ip route | sed -n '1,50p' || true
+            echo "External IP (via curl):"
+            curl -sS https://ifconfig.co || true
           fi
-
-          echo "Routing table (partial):"
-          /sbin/ip route | sed -n '1,50p'
-          echo "External IP (via curl):"
-          curl -sS https://ifconfig.co || true
 
       - name: Start local static server for test page
         run: |
-          # serve repo root so otment-test.html is available at /otment-test.html
           npm install -g http-server@14 || true
           nohup npx http-server -p 8080 -c-1 . > /tmp/http-server.log 2>&1 &
-          echo "Started http-server, waiting for it to serve files..."
+          echo "Started http-server; waiting..."
           for i in $(seq 1 10); do
             if curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
-              echo "test page reachable"
+              echo "✅ Test page reachable."
               break
             fi
             sleep 1
           done
           if ! curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
-            echo "Local test page not reachable" >&2
+            echo "❌ Local test page not reachable."
             cat /tmp/http-server.log || true
             exit 1
           fi
 
-      - name: Export TEST_PAGE_URL and CHROME_ARGS for runner
+      - name: Export TEST_PAGE_URL and CHROME_ARGS
         run: |
           echo "TEST_PAGE_URL=http://127.0.0.1:8080/otment-test.html" >> $GITHUB_ENV
           CHROME_ARGS="--disable-extensions-except=${PWD} --load-extension=${PWD} --enable-unsafe-swiftshader --no-sandbox --disable-dev-shm-usage --window-size=1920,1080"
@@ -150,15 +146,15 @@ jobs:
 
       - name: Print raw test page URL (for debugging)
         run: |
-          echo "GITHUB_REPOSITORY=${GITHUB_REPOSITORY}"
+          echo "Repo: ${GITHUB_REPOSITORY}"
           REF=${GITHUB_REF_NAME:-$(echo ${GITHUB_REF:-main} | sed -e 's@refs/heads/@@')}
           echo "Using ref: $REF"
           echo "TEST_PAGE_URL=${TEST_PAGE_URL}"
           echo "CHROME_ARGS=${CHROME_ARGS}"
 
-      - name: Capture pre-run chrome://extensions/ (best-effort)
+      - name: Capture pre-run chrome://extensions/ (placeholder)
         run: |
-          node -e "console.log('skip: capture will occur in run-headed-tests.js')"
+          node -e "console.log('skip: capture occurs inside run-headed-tests.js')"
 
       - name: Run headed tests under Xvfb
         env:
@@ -167,7 +163,6 @@ jobs:
           TEST_PAGE_URL: ${{ env.TEST_PAGE_URL }}
           CHROME_ARGS: ${{ env.CHROME_ARGS }}
         run: |
-          # Start X virtual framebuffer and run the test script that launches Chrome in headed mode
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
         timeout-minutes: 30
         continue-on-error: false
@@ -175,46 +170,31 @@ jobs:
       - name: Verify artifacts produced (fail if missing)
         if: always()
         run: |
-          echo "Listing artifacts after test run:"
+          echo "Listing artifacts:"
           ls -la artifacts || true
-          echo "Checking extension logs presence..."
+          echo "Checking extension-browser-logs.json..."
           if [ ! -s artifacts/extension-browser-logs.json ]; then
             echo "ERROR: artifacts/extension-browser-logs.json missing or empty" >&2
-            echo "Printing diagnostics dir:"; ls -la artifacts/diagnostics || true
-            echo "Printing screenshots dir:"; ls -la artifacts/screenshots || true
-            # copy openvpn log if present for debugging
-            if [ -f /tmp/openvpn.log ]; then
-              mkdir -p artifacts/diagnostics
-              cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
-              echo "Copied /tmp/openvpn.log to artifacts/diagnostics/openvpn.log"
-            fi
+            mkdir -p artifacts/diagnostics
+            [ -f /tmp/openvpn.log ] && cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
             exit 1
           fi
 
       - name: Collect browser logs and diagnostics
         if: always()
         run: |
-          echo "Chrome version:"
           google-chrome --version || chromium --version || true
-          echo "List artifacts directory:"
+          echo "Artifacts dir:"
           ls -la artifacts || true
-
-          echo "Preview browser logs (first 200 lines):"
+          echo "Preview logs:"
           sed -n '1,200p' artifacts/extension-browser-logs.json || true
-
-          echo "List diagnostics files:"
+          echo "Diagnostics files:"
           ls -la artifacts/diagnostics || true
-
-          echo "List screenshots (if any):"
+          echo "Screenshots:"
           ls -la artifacts/screenshots || true
-
-          echo "Tail OpenVPN log (if present):"
           if [ -f /tmp/openvpn.log ]; then
             tail -n 200 /tmp/openvpn.log || true
-            mkdir -p artifacts/diagnostics
             cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
-          else
-            echo "/tmp/openvpn.log not present"
           fi
 
       - name: Disconnect OpenVPN (cleanup)
@@ -223,10 +203,7 @@ jobs:
           PIDFILE="/tmp/openvpn.pid"
           if [ -f "$PIDFILE" ]; then
             pid=$(cat "$PIDFILE") || true
-            if [ -n "$pid" ]; then
-              sudo kill "$pid" || true
-              sleep 1
-            fi
+            [ -n "$pid" ] && sudo kill "$pid" || true
             rm -f "$PIDFILE" || true
           fi
           pkill -f openvpn || true
@@ -238,7 +215,7 @@ jobs:
           name: browser-artifacts
           path: |
             artifacts/extension-browser-logs.json
-            artifacts/extension-browser-logs-summary.txt
+            artifacts/extension-browser-logs-summary.json
             artifacts/diagnostics/**
             artifacts/screenshots/**
             artifacts/videos/**
