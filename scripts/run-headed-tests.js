@@ -1,121 +1,204 @@
+/**
+ * Orchestrator.js — Linux/GitHub Actions-safe replacement for AHK automation
+ * -----------------------------------------------------------
+ * ✅ Rotates through VPN configs (no repeats until reset)
+ * ✅ Connects to OpenVPN
+ * ✅ Verifies new external IP
+ * ✅ Launches Chrome (Puppeteer)
+ * ✅ Performs scripted page interactions
+ * ✅ Cleans up VPN tunnel
+ */
+
 import fs from "fs";
 import path from "path";
-import { Builder, By, until } from "selenium-webdriver";
-import chrome from "selenium-webdriver/chrome.js";
-import chromedriver from "chromedriver";
+import { execSync, spawn } from "child_process";
+import puppeteer from "puppeteer";
 
-const ROOT = process.cwd();
-const MANIFEST_PATH = path.join(ROOT, "manifest.json");
-const EXT_PATH = fs.existsSync(MANIFEST_PATH) ? ROOT : null;
+const vpnDir = path.resolve("VPN");
+const stateFile = path.join(vpnDir, ".vpn_state.json");
+const authFile = path.join(vpnDir, "auth.txt");
+const artifactsDir = path.resolve("artifacts/diagnostics");
+const testPage = "http://127.0.0.1:8080/otment-test.html";
+const publicIPUrl = "https://ifconfig.co";
+const connectTimeoutSec = 60;
 
-function rawTestPageUrl() {
-  const repo = process.env.GITHUB_REPOSITORY || "";
-  const ref = process.env.GITHUB_REF_NAME || (process.env.GITHUB_REF || "refs/heads/main").replace(/^refs\/heads\//, "");
-  if (!repo) return null;
-  return `https://raw.githubusercontent.com/${repo}/${ref}/otment-test.html`;
-}
+// ensure dirs
+fs.mkdirSync(artifactsDir, { recursive: true });
 
-async function tryExtractExtensionIdFromLogs(driver) {
+// === Helpers ===
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function getExternalIP() {
   try {
-    const logs = await driver.manage().logs().get("browser");
-    for (const entry of logs) {
-      const msg = (entry.message || "").toString();
-      const m = msg.match(/([a-p0-9]{32})/i);
-      if (m && /^[a-p0-9]{32}$/.test(m[1])) return m[1].toLowerCase();
-    }
-  } catch {}
-  return null;
-}
-
-async function dumpPageDiagnostics(driver, targetPathPrefix = "artifacts/diagnostics") {
-  try {
-    fs.mkdirSync(targetPathPrefix, { recursive: true });
-    const html = await driver.getPageSource();
-    fs.writeFileSync(path.join(targetPathPrefix, "page-source.html"), html, "utf8");
-    const info = await driver.executeScript(`
-      return { href: location.href, title: document.title, cookies: document.cookie || "" }
-    `);
-    fs.writeFileSync(path.join(targetPathPrefix, "page-info.json"), JSON.stringify(info, null, 2), "utf8");
-  } catch (e) {
-    console.warn("Failed to write page diagnostics:", e.message);
+    return execSync(`curl -s ${publicIPUrl}`, { encoding: "utf8" }).trim();
+  } catch {
+    return "unknown";
   }
 }
 
-(async function run() {
-  let driver;
+function listVpnConfigs() {
+  return fs
+    .readdirSync(vpnDir)
+    .filter((f) => f.endsWith(".ovpn"))
+    .map((f) => path.join(vpnDir, f));
+}
+
+function loadRotationState() {
+  if (fs.existsSync(stateFile)) {
+    return JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  }
+  return { used: [] };
+}
+
+function saveRotationState(state) {
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+}
+
+async function connectVPN(configPath) {
+  const logFile = "/tmp/openvpn.log";
+  const pidFile = "/tmp/openvpn.pid";
+
+  // stop previous VPN if any
   try {
-    const serviceBuilder = new chrome.ServiceBuilder(chromedriver.path);
-    const options = new chrome.Options();
-    options.addArguments("--no-sandbox", "--disable-dev-shm-usage", "--window-size=1920,1080");
+    execSync("sudo pkill -f openvpn || true");
+  } catch {}
 
-    if (EXT_PATH) {
-      console.log("Loading unpacked extension from:", EXT_PATH);
-      options.addArguments(`--load-extension=${EXT_PATH}`);
-    } else {
-      console.log("No extension found — running without load-extension");
-    }
+  console.log(`🌐 Connecting VPN: ${path.basename(configPath)}`);
+  const baseIP = getExternalIP();
+  console.log(`Current IP: ${baseIP}`);
 
-    driver = await new Builder()
-      .forBrowser("chrome")
-      .setChromeOptions(options)
-      .setChromeService(serviceBuilder)
-      .build();
+  const proc = spawn("sudo", [
+    "openvpn",
+    "--config",
+    configPath,
+    "--auth-user-pass",
+    authFile,
+    "--daemon",
+    "--writepid",
+    pidFile,
+    "--log",
+    logFile,
+  ]);
 
-    const testPage = rawTestPageUrl() || "http://127.0.0.1:8080/otment-test.html";
-    console.log("Navigating to test page:", testPage);
-    await driver.get(testPage);
-
-    await driver.wait(async () => {
-      const ready = await driver.executeScript("return document.readyState");
-      return ready === "complete" || ready === "interactive";
-    }, 10000).catch(() => {});
-
-    await driver.executeScript(`
-      try { 
-        window.dispatchEvent(new CustomEvent('OTMENT_RUN_TEST', {detail:{action:'activate'}})); 
-      } catch(e) {}
-    `).catch(() => {});
-
-    await driver.sleep(1500);
-
-    const markerSelector = "#otment-status.active";
-    let markerFound = false;
+  // wait for tun0
+  let connected = false;
+  for (let i = 0; i < connectTimeoutSec; i++) {
+    await sleep(1000);
     try {
-      await driver.wait(until.elementLocated(By.css(markerSelector)), 8000);
-      console.log("✅ Detected otment-status marker on page");
-      markerFound = true;
-    } catch {
-      console.warn("⚠️ Marker not found within timeout.");
-    }
+      const ifaces = execSync("ip a", { encoding: "utf8" });
+      if (ifaces.includes("tun0")) {
+        connected = true;
+        break;
+      }
+    } catch {}
+  }
 
-    await dumpPageDiagnostics(driver, "artifacts/diagnostics");
-
-    fs.mkdirSync("artifacts/screenshots", { recursive: true });
+  if (!connected) {
+    console.log("❌ VPN failed to connect within timeout.");
     try {
-      const image = await driver.takeScreenshot();
-      fs.writeFileSync(path.join("artifacts/screenshots", "extension-activated.png"), image, "base64");
-      console.log("📸 Screenshot saved to artifacts/screenshots/extension-activated.png");
-    } catch (e) {
-      console.warn("Screenshot failed:", e.message);
+      console.log(fs.readFileSync(logFile, "utf8"));
+    } catch {}
+    throw new Error("VPN connection timeout");
+  }
+
+  const vpnIP = getExternalIP();
+  console.log(`VPN external IP: ${vpnIP}`);
+
+  if (vpnIP === baseIP || vpnIP === "unknown") {
+    throw new Error("VPN did not change external IP.");
+  }
+
+  console.log("✅ VPN active and IP changed.");
+  return { vpnIP, baseIP };
+}
+
+async function disconnectVPN() {
+  try {
+    execSync("sudo pkill -f openvpn || true");
+  } catch {}
+  console.log("🔌 VPN disconnected.");
+}
+
+// === Browser Automation ===
+async function runBrowserAutomation(vpnName) {
+  console.log(`🧠 Launching Chrome automation for ${vpnName}...`);
+  const browser = await puppeteer.launch({
+    headless: false,
+    args: [
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--window-size=1920,1080",
+      `--disable-extensions-except=${process.cwd()}`,
+      `--load-extension=${process.cwd()}`,
+    ],
+  });
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(20000);
+
+  try {
+    await page.goto(testPage, { waitUntil: "networkidle2" });
+    await sleep(2000);
+
+    // mimic your AHK "click" patterns
+    await page.mouse.click(100, 200); // x=100 y=200
+    await sleep(1000);
+    await page.mouse.click(560, 300); // x=562 y=303 in AHK
+    await sleep(1500);
+
+    // reload 3 times like AHK
+    for (let i = 0; i < 3; i++) {
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await sleep(1000);
     }
 
-    try {
-      const logs = await driver.manage().logs().get("browser");
-      fs.mkdirSync("artifacts", { recursive: true });
-      fs.writeFileSync("artifacts/extension-browser-logs.json", JSON.stringify(logs, null, 2), "utf8");
-      console.log("🧾 Browser logs saved.");
-    } catch (e) {
-      console.warn("Could not capture browser logs:", e.message);
-    }
-
-    await driver.quit();
-    console.log("✅ Headed test finished successfully");
-    process.exit(0);
+    // take screenshot
+    const shot = path.join(
+      "artifacts/screenshots",
+      `screenshot-${vpnName}.png`
+    );
+    await page.screenshot({ path: shot, fullPage: true });
+    console.log(`📸 Screenshot saved: ${shot}`);
   } catch (err) {
-    console.error("❌ Headed test failed:", err.stack || err);
-    if (driver) try { await driver.quit(); } catch {}
-    fs.mkdirSync("artifacts", { recursive: true });
-    fs.writeFileSync("artifacts/extension-browser-logs.json", JSON.stringify([{ level: "ERROR", message: err.message }], null, 2));
+    console.error("❌ Browser automation failed:", err);
+  } finally {
+    await browser.close();
+  }
+}
+
+// === Main ===
+(async () => {
+  const allConfigs = listVpnConfigs();
+  if (allConfigs.length === 0) {
+    console.error("No VPN configs found in /VPN/");
     process.exit(1);
+  }
+
+  let state = loadRotationState();
+  const remaining = allConfigs.filter(
+    (cfg) => !state.used.includes(path.basename(cfg))
+  );
+
+  const nextConfig =
+    remaining.length > 0 ? remaining[0] : allConfigs[0]; // reset if done
+  const vpnName = path.basename(nextConfig).replace(/\.ovpn$/, "");
+
+  console.log(`🔁 Selected VPN: ${vpnName}`);
+  if (remaining.length === 0) {
+    console.log("🔄 Resetting rotation — all configs used.");
+    state.used = [];
+  }
+
+  try {
+    const vpnInfo = await connectVPN(nextConfig);
+    await runBrowserAutomation(vpnName);
+  } catch (err) {
+    console.error("❌ Error:", err.message);
+  } finally {
+    await disconnectVPN();
+    state.used.push(path.basename(nextConfig));
+    saveRotationState(state);
+    console.log("✅ Rotation state updated.");
   }
 })();
