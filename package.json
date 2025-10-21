@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "test:headed": "node ./scripts/run-headed-tests.js"
+    "test:headed": "node ./scripts/orchestrator.js"
   },
   "keywords": [],
   "author": "",
