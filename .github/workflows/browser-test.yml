@@ -172,9 +172,23 @@ jobs:
       - name: 🚀 Run orchestrator (Puppeteer + VPN)
         env:
           TARGET_URL: "http://127.0.0.1:8080/otment-test.html"
+          PUPPETEER_EXECUTABLE_PATH: "/usr/bin/google-chrome"
         run: |
-          echo "Running orchestrator.js..."
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
+          echo "Starting Puppeteer orchestrator..."
+          export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1920x1080x24 &
+
+          echo "⏳ Waiting 3s for Xvfb to initialize..."
+          sleep 3
+
+          echo "💻 Running orchestrator.js under Xvfb"
+          node --trace-warnings scripts/orchestrator.js || {
+            echo "❌ Puppeteer launch failed — showing diagnostics:"
+            ps aux | grep chrome || true
+            cat /tmp/http-server.log || true
+            exit 1
+          }
         timeout-minutes: 30
 
       - name: 🧩 Verify artifacts
