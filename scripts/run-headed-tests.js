@@ -1,0 +1,39 @@
+import {Builder, By, until} from "selenium-webdriver";
+import chrome from "selenium-webdriver/chrome";
+import path from "path";
+
+const extPath = path.resolve(process.cwd(), "extension-unpacked"); // repo folder with manifest.json
+const options = new chrome.Options();
+options.addArguments(
+  `--load-extension=${extPath}`,
+  "--no-sandbox",
+  "--disable-dev-shm-usage",
+  "--window-size=1920,1080"
+);
+
+(async function run() {
+  const driver = await new Builder().forBrowser("chrome").setChromeOptions(options).build();
+  try {
+    // Wait briefly for extension to load and print logs if needed
+    await driver.sleep(1500);
+
+    // If you know the extension id, navigate directly:
+    // await driver.get("chrome-extension://<EXT_ID>/popup.html");
+
+    // If you don't know the ID, open chrome://extensions and read the id from the page
+    await driver.get("chrome://extensions/?id=");
+    // chrome:// pages are restricted; if chrome://extensions isn't scriptable in your environment,
+    // read the id from ChromeDriver logs or infer from the extension path logging output.
+
+    // Example: open extension page if ID known
+    const EXT_ID = "your_extension_id_here";
+    await driver.get(`chrome-extension://${EXT_ID}/popup.html`);
+    await driver.wait(until.elementLocated(By.css("button.activate")), 5000);
+    await driver.findElement(By.css("button.activate")).click();
+
+    // perform verification
+    await driver.wait(until.titleContains("My Extension Active"), 5000);
+  } finally {
+    await driver.quit();
+  }
+})();
