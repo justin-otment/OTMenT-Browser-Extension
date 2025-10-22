@@ -1,12 +1,12 @@
 /**
- * Orchestrator.js — Linux/GitHub Actions-safe replacement for AHK automation
+ * Orchestrator.js — Linux/GitHub Actions-safe automation
  * -----------------------------------------------------------
- * ✅ Rotates through VPN configs (no repeats until reset)
+ * ✅ Rotates through VPN configs
  * ✅ Connects to OpenVPN
  * ✅ Verifies new external IP
  * ✅ Launches Chrome (Puppeteer) with unpacked extension
- * ✅ Waits for iframe + input to become visible
- * ✅ Clicks input inside iframe and captures screenshot
+ * ✅ Confirms extension load
+ * ✅ Waits for iframe + input, clicks, screenshots
  * ✅ Cleans up VPN tunnel
  */
 
@@ -20,8 +20,8 @@ const stateFile = path.join(vpnDir, ".vpn_state.json");
 const authFile = path.join(vpnDir, "auth.txt");
 const artifactsDir = path.resolve("artifacts/diagnostics");
 const screenshotsDir = path.resolve("artifacts/screenshots");
-const testPage = process.env.TEST_PAGE_URL || "http://127.0.0.1:8080/otment-test.html";
-const publicIPUrl = "https://api.ipify.org";
+const testPage = "http://127.0.0.1:8080/otment-test.html";
+const publicIPUrl = "https://ifconfig.co";
 const connectTimeoutSec = 60;
 
 // Ensure directories exist
@@ -61,7 +61,7 @@ async function connectVPN(configPath) {
   const logFile = "/tmp/openvpn.log";
   const pidFile = "/tmp/openvpn.pid";
 
-  // Stop previous VPN if any
+  // stop previous VPN if any
   try {
     execSync("sudo pkill -f openvpn || true");
   } catch {}
@@ -83,7 +83,7 @@ async function connectVPN(configPath) {
     logFile,
   ]);
 
-  // Wait for tun0 to appear
+  // wait for tun0
   let connected = false;
   for (let i = 0; i < connectTimeoutSec; i++) {
     await sleep(1000);
@@ -126,41 +126,47 @@ async function disconnectVPN() {
 async function runBrowserAutomation(vpnName) {
   console.log(`🧠 Launching Chrome automation for ${vpnName}...`);
 
-  const defaultArgs = [
-    `--disable-extensions-except=${process.cwd()}`,
-    `--load-extension=${process.cwd()}`,
-    "--enable-unsafe-swiftshader",
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--window-size=1920,1080",
-  ];
+  const chromePath = process.env.CHROME_PATH || "/usr/bin/google-chrome";
+  const chromeArgs = (process.env.CHROME_ARGS || "").split(" ").filter(Boolean);
 
-  const chromeArgs = (process.env.CHROME_ARGS || defaultArgs.join(" ")).split(" ");
+  console.log("➡️ Chrome path:", chromePath);
+  console.log("➡️ Chrome args:", chromeArgs.join(" "));
 
   const browser = await puppeteer.launch({
     headless: false,
-    executablePath: process.env.CHROME_PATH || "/usr/bin/google-chrome",
+    executablePath: chromePath,
     args: chromeArgs,
-    ignoreDefaultArgs: ["--disable-extensions"],
+    ignoreDefaultArgs: ["--disable-extensions"], // ✅ critical: allow unpacked extensions
   });
 
-  // Confirm extension load
-  const targets = await browser.targets();
-  const extensions = targets.filter(
-    (t) => t.type() === "background_page" || t.url().startsWith("chrome-extension://")
-  );
-  console.log("🔍 Loaded extensions:", extensions.map((t) => t.url()));
+  // === Verify Extension Loaded ===
+  try {
+    const targets = await browser.targets();
+    const extensions = targets.filter((t) =>
+      t.url().startsWith("chrome-extension://")
+    );
+
+    if (extensions.length > 0) {
+      console.log(
+        "🧩 Loaded extensions:",
+        extensions.map((t) => t.url()).join(", ")
+      );
+    } else {
+      console.warn("⚠️ No extensions detected. Check manifest or args path.");
+    }
+  } catch (e) {
+    console.warn("⚠️ Could not verify extensions:", e.message);
+  }
 
   const page = await browser.newPage();
   page.setDefaultTimeout(30000);
 
   try {
     console.log(`🌍 Navigating to ${testPage}`);
-    await page.goto(testPage, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.goto(testPage, { waitUntil: "networkidle2" });
 
-    console.log("⏳ Waiting for iframe to appear...");
+    console.log("⏳ Waiting for iframe...");
     await page.waitForSelector("iframe", { visible: true, timeout: 30000 });
-
     const frameHandle = await page.$("iframe");
     const frame = await frameHandle.contentFrame();
 
@@ -175,11 +181,11 @@ async function runBrowserAutomation(vpnName) {
     await page.screenshot({ path: shot, fullPage: true });
     console.log(`📸 Screenshot saved: ${shot}`);
 
+    // Simulate reloads for stability
     for (let i = 0; i < 2; i++) {
       await page.reload({ waitUntil: "domcontentloaded" });
       await sleep(1000);
     }
-
   } catch (err) {
     console.error("❌ Browser automation failed:", err.message);
   } finally {
@@ -200,7 +206,8 @@ async function runBrowserAutomation(vpnName) {
     (cfg) => !state.used.includes(path.basename(cfg))
   );
 
-  const nextConfig = remaining.length > 0 ? remaining[0] : allConfigs[0];
+  const nextConfig =
+    remaining.length > 0 ? remaining[0] : allConfigs[0]; // reset if done
   const vpnName = path.basename(nextConfig).replace(/\.ovpn$/, "");
 
   console.log(`🔁 Selected VPN: ${vpnName}`);
