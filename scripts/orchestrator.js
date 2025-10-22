@@ -4,9 +4,10 @@
  * ✅ Rotates VPN configs safely
  * ✅ Connects via OpenVPN & verifies new IP
  * ✅ Launches Chrome with unpacked extension (root dir)
- * ✅ Navigates to target FastPeopleSearch URL
- * ✅ Waits for extension injection
- * ✅ Captures screenshot & logs diagnostics
+ * ✅ Logs all loaded Chrome extensions (extensions.log)
+ * ✅ Automates FastPeopleSearch test URL
+ * ✅ Captures screenshot + saves diagnostics
+ * ✅ Cleans up VPN and updates rotation
  */
 
 import fs from "fs";
@@ -19,15 +20,15 @@ const stateFile = path.join(vpnDir, ".vpn_state.json");
 const authFile = path.join(vpnDir, "auth.txt");
 const artifactsDir = path.resolve("artifacts/diagnostics");
 const screenshotsDir = path.resolve("artifacts/screenshots");
+
+// from env or fallback
+const testPage =
+  process.env.TEST_PAGE_URL ||
+  "https://www.fastpeoplesearch.com/address/123-main-st_98001";
 const publicIPUrl = "https://ifconfig.co";
 const connectTimeoutSec = 60;
 
-// Set default test URL if none provided
-const targetUrl =
-  process.env.TEST_PAGE_URL ||
-  "https://www.fastpeoplesearch.com/address/123-main-st_98001";
-
-// Ensure dirs exist
+// ensure directories exist
 fs.mkdirSync(artifactsDir, { recursive: true });
 fs.mkdirSync(screenshotsDir, { recursive: true });
 
@@ -42,9 +43,10 @@ function getExternalIP() {
 }
 
 function listVpnConfigs() {
-  return fs.readdirSync(vpnDir)
-    .filter(f => f.endsWith(".ovpn"))
-    .map(f => path.join(vpnDir, f));
+  return fs
+    .readdirSync(vpnDir)
+    .filter((f) => f.endsWith(".ovpn"))
+    .map((f) => path.join(vpnDir, f));
 }
 
 function loadRotationState() {
@@ -62,7 +64,9 @@ async function connectVPN(configPath) {
   const logFile = "/tmp/openvpn.log";
   const pidFile = "/tmp/openvpn.pid";
 
-  try { execSync("sudo pkill -f openvpn || true"); } catch {}
+  try {
+    execSync("sudo pkill -f openvpn || true");
+  } catch {}
 
   console.log(`🌐 Connecting VPN: ${path.basename(configPath)}`);
   const baseIP = getExternalIP();
@@ -70,14 +74,18 @@ async function connectVPN(configPath) {
 
   spawn("sudo", [
     "openvpn",
-    "--config", configPath,
-    "--auth-user-pass", authFile,
+    "--config",
+    configPath,
+    "--auth-user-pass",
+    authFile,
     "--daemon",
-    "--writepid", pidFile,
-    "--log", logFile
+    "--writepid",
+    pidFile,
+    "--log",
+    logFile,
   ]);
 
-  // Wait for tun0 to appear
+  // wait for tun0 to appear
   let connected = false;
   for (let i = 0; i < connectTimeoutSec; i++) {
     await sleep(1000);
@@ -92,7 +100,9 @@ async function connectVPN(configPath) {
 
   if (!connected) {
     console.log("❌ VPN failed to connect within timeout.");
-    try { console.log(fs.readFileSync(logFile, "utf8")); } catch {}
+    try {
+      console.log(fs.readFileSync(logFile, "utf8"));
+    } catch {}
     throw new Error("VPN connection timeout");
   }
 
@@ -107,7 +117,9 @@ async function connectVPN(configPath) {
 }
 
 async function disconnectVPN() {
-  try { execSync("sudo pkill -f openvpn || true"); } catch {}
+  try {
+    execSync("sudo pkill -f openvpn || true");
+  } catch {}
   console.log("🔌 VPN disconnected.");
 }
 
@@ -127,40 +139,46 @@ async function runBrowserAutomation(vpnName) {
       "--allow-insecure-localhost",
       "--ignore-certificate-errors",
       "--enable-extensions",
-      "--user-data-dir=/tmp/chrome-profile"
+      "--user-data-dir=/tmp/chrome-profile",
     ],
     ignoreDefaultArgs: ["--disable-extensions", "--headless"],
   });
 
   console.log("✅ Chrome started successfully.");
 
-  // confirm extension loaded
-  const targets = await browser.targets();
-  const extensions = targets.filter(t =>
-    t.url().startsWith("chrome-extension://")
-  );
-  console.log("🔍 Loaded extensions:", extensions.map(t => t.url()));
-  if (!extensions.length) {
-    console.warn("⚠️ No extensions detected — extension may have failed to load.");
+  // detect & log extensions
+  try {
+    const extensions = (await browser.targets())
+      .filter((t) => t.url().startsWith("chrome-extension://"))
+      .map((t) => t.url());
+
+    const extLog = path.join(artifactsDir, "extensions.log");
+    fs.writeFileSync(extLog, extensions.join("\n"), "utf8");
+
+    if (extensions.length > 0) {
+      console.log(`🔍 Detected ${extensions.length} extension(s):`);
+      extensions.forEach((u) => console.log("  •", u));
+    } else {
+      console.warn("⚠️ No extensions detected — check --load-extension path.");
+    }
+  } catch (e) {
+    console.error("❌ Failed to list extensions:", e.message);
   }
 
   const page = await browser.newPage();
-  page.setDefaultTimeout(45000);
+  page.setDefaultTimeout(30000);
 
   try {
-    console.log(`🌍 Navigating to ${targetUrl}`);
-    await page.goto(targetUrl, { waitUntil: "networkidle2" });
+    console.log(`🌍 Navigating to ${testPage}`);
+    await page.goto(testPage, { waitUntil: "networkidle2" });
 
-    console.log("⏳ Waiting for extension to activate...");
-    // Wait for a signal element (you can customize this selector)
-    await page.waitForSelector("#otment-status, .otment-active", { timeout: 20000 }).catch(() => {
-      console.warn("⚠️ Extension marker not found, continuing anyway.");
-    });
-
-    const shot = path.join(screenshotsDir, `fastpeoplesearch-${vpnName}.png`);
-    await page.screenshot({ path: shot, fullPage: true });
-    console.log(`📸 Screenshot saved: ${shot}`);
-
+    const shotPath = path.join(
+      screenshotsDir,
+      `fastpeoplesearch-${vpnName}.png`
+    );
+    await sleep(3000);
+    await page.screenshot({ path: shotPath, fullPage: true });
+    console.log(`📸 Screenshot saved: ${shotPath}`);
   } catch (err) {
     console.error("❌ Browser automation failed:", err.message);
   } finally {
@@ -178,7 +196,9 @@ async function runBrowserAutomation(vpnName) {
   }
 
   const state = loadRotationState();
-  const remaining = allConfigs.filter(cfg => !state.used.includes(path.basename(cfg)));
+  const remaining = allConfigs.filter(
+    (cfg) => !state.used.includes(path.basename(cfg))
+  );
   const nextConfig = remaining.length ? remaining[0] : allConfigs[0];
   const vpnName = path.basename(nextConfig).replace(/\.ovpn$/, "");
 
