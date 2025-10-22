@@ -13,7 +13,7 @@
 import fs from "fs";
 import path from "path";
 import { execSync, spawn } from "child_process";
-import puppeteer from "puppeteer";
+import puppeteer from "puppeteer-core";
 
 const vpnDir = path.resolve("VPN");
 const stateFile = path.join(vpnDir, ".vpn_state.json");
@@ -210,3 +210,4 @@ async function runBrowserAutomation(vpnName) {
     console.log("✅ Rotation state updated.");
   }
 })();
+
