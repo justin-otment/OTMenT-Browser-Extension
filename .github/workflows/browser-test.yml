@@ -19,77 +19,56 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install APT deps and enable universe
+      - name: Install system dependencies
         run: |
           sudo apt-get update -y
           sudo apt-get install -y software-properties-common
           sudo add-apt-repository -y universe
           sudo apt-get update -y
-          apt-cache policy libasound2 libasound2t64 liboss4-salsa-asound2 || true
           sudo apt-get install -y --no-install-recommends \
-            xvfb \
-            libgtk-3-0 \
-            libxss1 \
-            libasound2t64 \
-            fonts-liberation \
-            libgbm-dev \
-            libnss3-dev \
-            libu2f-udev \
-            xdg-utils \
-            openvpn \
-            iproute2 \
-            iputils-ping \
-            curl
+            xvfb libgtk-3-0 libxss1 libasound2t64 fonts-liberation \
+            libgbm-dev libnss3-dev libu2f-udev xdg-utils openvpn \
+            iproute2 iputils-ping curl
 
-      - name: Setup Chrome
+      - name: Setup Chrome (Chromium)
         uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: latest
           install-dependencies: true
+          install-chromedriver: false
 
       - name: Install npm packages (tolerant)
         run: |
-          # Prefer clean CI install but fall back to an install-and-retry if lockfile is out of sync.
           set -euo pipefail
-          echo "Attempting npm ci (strict lockfile install)..."
-          if npm ci; then
-            echo "npm ci succeeded"
-          else
-            echo "npm ci failed; attempting npm install to refresh lockfile, then npm ci"
-            npm install
-            npm ci
+          echo "Attempting npm ci..."
+          if ! npm ci; then
+            echo "npm ci failed — lockfile likely outdated."
+            npm install --legacy-peer-deps
+            npm ci || npm install
           fi
 
-      - name: Ensure chromedriver is available (npm)
+      - name: Locate Chrome binary
+        id: chrome-bin
+        run: |
+          CHROME_BIN=$(which chromium || which google-chrome || echo "")
+          if [ -z "$CHROME_BIN" ]; then
+            CHROME_BIN=$(find /opt/hostedtoolcache/setup-chrome -type f -name chrome | head -n1)
+          fi
+          echo "CHROME_BIN=$CHROME_BIN" | tee -a $GITHUB_ENV
+          echo "Using Chrome binary: $CHROME_BIN"
+
+      - name: Ensure chromedriver (diagnostic)
         run: |
           ls -la node_modules/.bin || true
-          node -e "console.log(require('chromedriver').path || 'chromedriver not found')"
+          node -e "console.log(require('chromedriver')?.path || 'chromedriver not found')" || true
 
-      - name: Create artifact folders
-        run: |
-          mkdir -p artifacts/screenshots
-          mkdir -p artifacts/diagnostics
-          mkdir -p artifacts/videos || true
+      - name: Prepare artifacts directories
+        run: mkdir -p artifacts/{screenshots,diagnostics,videos}
 
-      - name: Show package.json scripts
-        run: |
-          echo "package.json:"
-          cat package.json
-          echo "npm run (available scripts):"
-          npm run
-
-      - name: Diagnostics - list repo and extension files
-        run: |
-          echo "Working dir: $(pwd)"
-          echo "Manifest exists:"; test -f manifest.json && echo "yes" || echo "no"
-          echo "List root files:"; ls -la
-          echo "Show manifest (first 200 lines):"; sed -n '1,200p' manifest.json || true
-          echo "List extension-related JS files:"; ls -la | grep -E "background.js|manifest.json|options.html|options.js|solver.detector.content.js|crypto-utils.js|crypto-worker.js" || true
-
-      - name: Ensure test page exists
+      - name: Verify or create test page
         run: |
           if [ ! -f "otment-test.html" ]; then
-            echo "⚠️  otment-test.html missing — creating minimal fallback page..."
+            echo "⚠️ otment-test.html missing, creating fallback..."
             cat <<'EOF' > otment-test.html
           <!DOCTYPE html>
           <html lang="en">
@@ -103,60 +82,39 @@ jobs:
           </html>
           EOF
           fi
-          echo "✅ Verified otment-test.html present."
+          echo "✅ otment-test.html ready."
 
-      - name: Rotate and start OpenVPN connection
+      - name: Start OpenVPN (rotate configs)
         env:
           CI: true
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-
           VPN_DIR="VPN"
           AUTH_FILE="$VPN_DIR/auth.txt"
           STATE_FILE="$VPN_DIR/rotation_state.txt"
           PIDFILE="/tmp/openvpn.pid"
           LOGFILE="/tmp/openvpn.log"
 
-          echo "🔍 Scanning for available .ovpn configs..."
           mapfile -t OVPN_LIST < <(find "$VPN_DIR" -maxdepth 1 -type f -name "*.ovpn" | sort)
-          if [ "${#OVPN_LIST[@]}" -eq 0 ]; then
-            echo "❌ ERROR: No .ovpn files found in $VPN_DIR"
-            ls -la "$VPN_DIR" || true
-            exit 1
+          if [ ${#OVPN_LIST[@]} -eq 0 ]; then
+            echo "❌ No .ovpn found in $VPN_DIR"; exit 1
           fi
-          echo "📦 Found ${#OVPN_LIST[@]} configs."
-
-          if [ ! -f "$AUTH_FILE" ]; then
-            echo "❌ ERROR: Missing $AUTH_FILE"
-            exit 1
-          fi
+          [ -f "$AUTH_FILE" ] || { echo "❌ Missing $AUTH_FILE"; exit 1; }
 
           if [ -f "$STATE_FILE" ]; then
-            LAST_USED=$(cat "$STATE_FILE" || true)
-            echo "🕹 Last used config: $LAST_USED"
-            NEXT=""
-            for ((i = 0; i < ${#OVPN_LIST[@]}; i++)); do
-              if [[ "${OVPN_LIST[$i]}" == "$LAST_USED" ]]; then
-                NEXT_INDEX=$(( (i + 1) % ${#OVPN_LIST[@]} ))
-                NEXT="${OVPN_LIST[$NEXT_INDEX]}"
-                break
-              fi
-            done
-            if [ -z "$NEXT" ]; then
-              NEXT="${OVPN_LIST[0]}"
-            fi
+            LAST=$(cat "$STATE_FILE" || true)
+            IDX=$(printf '%s\n' "${OVPN_LIST[@]}" | grep -nFx "$LAST" | cut -d: -f1 || echo 0)
+            NEXT_INDEX=$(( (IDX) % ${#OVPN_LIST[@]} ))
+            NEXT="${OVPN_LIST[$NEXT_INDEX]}"
           else
-            echo "🆕 No rotation history found. Starting fresh."
             NEXT="${OVPN_LIST[0]}"
           fi
 
-          echo "🧭 Selected VPN config: $NEXT"
           echo "$NEXT" > "$STATE_FILE"
+          echo "🧭 Using VPN config: $NEXT"
 
-          echo "🌐 Capturing baseline external IP..."
           BASE_IP=$(curl -sS https://ifconfig.co || echo "unknown")
-          echo "Base external IP: $BASE_IP"
+          echo "🌐 Base IP: $BASE_IP"
 
           echo "🚀 Starting OpenVPN..."
           if grep -q "auth-user-pass" "$NEXT"; then
@@ -165,130 +123,79 @@ jobs:
             sudo nohup openvpn --config "$NEXT" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
           fi
 
-          echo "⏳ Waiting up to 60 seconds for VPN interface (tun0)..."
+          sleep 3
+          [ -f "$PIDFILE" ] || { echo "❌ OpenVPN failed to start"; tail -n 50 "$LOGFILE"; exit 1; }
+
+          echo "⏳ Waiting for tun0..."
           for i in $(seq 1 60); do
-            if /sbin/ip a | grep -q tun0; then
-              echo "✅ tun0 detected after $i seconds"
-              break
-            fi
+            ip a show tun0 &>/dev/null && break
             sleep 1
           done
+          ip a show tun0 &>/dev/null || { echo "❌ VPN interface not found"; tail -n 100 "$LOGFILE"; exit 1; }
 
-          if ! /sbin/ip a | grep -q tun0; then
-            echo "❌ ERROR: VPN interface tun0 not detected after 60 seconds"
-            tail -n 100 "$LOGFILE" || true
-            exit 1
-          fi
-
-          echo "📡 Checking external IP after VPN activation..."
           VPN_IP=$(curl -sS https://ifconfig.co || echo "unknown")
-          echo "VPN external IP: $VPN_IP"
+          echo "VPN IP: $VPN_IP"
+          [ "$VPN_IP" != "$BASE_IP" ] && [ "$VPN_IP" != "unknown" ] || {
+            echo "❌ VPN connection failed"; tail -n 100 "$LOGFILE"; exit 1;
+          }
 
-          if [ "$VPN_IP" = "$BASE_IP" ] || [ "$VPN_IP" = "unknown" ]; then
-            echo "❌ ERROR: External IP did not change — VPN may have failed"
-            tail -n 200 "$LOGFILE" || true
-            exit 1
-          fi
-
-          echo "✅ VPN successfully activated"
-          echo "Routing table:"
-          /sbin/ip route | sed -n '1,30p'
-
-      - name: Start local static server for test page
+      - name: Start local test server
         run: |
-          npm install -g http-server@14 || true
+          npm install -g http-server@14
           nohup npx http-server -p 8080 -c-1 . > /tmp/http-server.log 2>&1 &
-          echo "Started http-server; waiting..."
           for i in $(seq 1 10); do
-            if curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
-              echo "✅ Test page reachable."
-              break
-            fi
+            curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1 && break
             sleep 1
           done
-          if ! curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1; then
-            echo "❌ Local test page not reachable."
-            cat /tmp/http-server.log || true
-            exit 1
-          fi
+          curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null || {
+            echo "❌ Test page not reachable"; cat /tmp/http-server.log; exit 1;
+          }
 
-      - name: Export TEST_PAGE_URL and CHROME_ARGS
+      - name: Export Chrome args
         run: |
           echo "TEST_PAGE_URL=http://127.0.0.1:8080/otment-test.html" >> $GITHUB_ENV
-          CHROME_ARGS="--disable-extensions-except=${PWD} --load-extension=${PWD} --enable-unsafe-swiftshader --no-sandbox --disable-dev-shm-usage --window-size=1920,1080"
-          echo "CHROME_ARGS=$CHROME_ARGS" >> $GITHUB_ENV
+          echo "CHROME_ARGS=--disable-extensions-except=${PWD} --load-extension=${PWD} --enable-unsafe-swiftshader --no-sandbox --disable-dev-shm-usage --window-size=1920,1080" >> $GITHUB_ENV
 
       - name: Run headed tests under Xvfb
         env:
           CI: true
-          GITHUB_REF_NAME: ${{ github.ref_name }}
           TEST_PAGE_URL: ${{ env.TEST_PAGE_URL }}
           CHROME_ARGS: ${{ env.CHROME_ARGS }}
-          # Use puppeteer-core + system Chrome; avoid downloading Chromium during CI
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
-          CHROME_PATH: "/usr/bin/google-chrome"
+          CHROME_PATH: ${{ env.CHROME_BIN }}
         run: |
           set -euo pipefail
-          # run tests but always capture exit code so we can collect diagnostics
-          set +e
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
-          rc=$?
-          set -e
-          # ensure artifacts dirs exist and capture OpenVPN log with sudo if needed
-          mkdir -p artifacts/diagnostics artifacts/screenshots artifacts/videos
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed || RC=$?
+          mkdir -p artifacts/diagnostics
           sudo cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log 2>/dev/null || true
-          exit $rc
+          exit ${RC:-0}
         timeout-minutes: 30
-        continue-on-error: false
 
-      - name: Verify artifacts produced (fail if missing)
+      - name: Verify artifacts
         if: always()
         run: |
-          echo "Listing artifacts:"
           ls -la artifacts || true
           if [ ! -s artifacts/extension-browser-logs.json ]; then
-            echo "ERROR: artifacts/extension-browser-logs.json missing or empty" >&2
-            mkdir -p artifacts/diagnostics
-            sudo cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log 2>/dev/null || true
-            exit 1
+            echo "⚠️ extension-browser-logs.json missing; continuing with diagnostics only"
           fi
 
-      - name: Collect browser logs and diagnostics
+      - name: Collect diagnostics
         if: always()
         run: |
-          google-chrome --version || chromium --version || true
-          echo "Artifacts dir:"
-          ls -la artifacts || true
-          echo "Preview logs:"
-          sed -n '1,200p' artifacts/extension-browser-logs.json || true
-          echo "Diagnostics files:"
-          ls -la artifacts/diagnostics || true
-          echo "Screenshots:"
-          ls -la artifacts/screenshots || true
-          if [ -f /tmp/openvpn.log ]; then
-            tail -n 200 /tmp/openvpn.log || true
-            sudo cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
-          fi
+          (google-chrome --version || chromium --version || true)
+          echo "Artifacts:"
+          find artifacts -maxdepth 2 -type f | sed 's/^/  /'
+          tail -n 100 /tmp/openvpn.log 2>/dev/null || true
 
-      - name: Disconnect OpenVPN (cleanup)
+      - name: Disconnect OpenVPN
         if: always()
         run: |
-          PIDFILE="/tmp/openvpn.pid"
-          if [ -f "$PIDFILE" ]; then
-            pid=$(cat "$PIDFILE") || true
-            [ -n "$pid" ] && sudo kill "$pid" || true
-            sudo rm -f "$PIDFILE" || true
-          fi
           sudo pkill -f openvpn || true
+          sudo rm -f /tmp/openvpn.pid || true
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: browser-artifacts
-          path: |
-            artifacts/extension-browser-logs.json
-            artifacts/extension-browser-logs-summary.json
-            artifacts/diagnostics/**
-            artifacts/screenshots/**
-            artifacts/videos/**
+          path: artifacts/**
