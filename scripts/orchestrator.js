@@ -4,9 +4,9 @@
  * ✅ Rotates VPN configs safely
  * ✅ Connects via OpenVPN & verifies new IP
  * ✅ Launches Chrome with unpacked extension (root dir)
- * ✅ Confirms extension loaded & validates manifest
- * ✅ Automates test page interaction & screenshot
- * ✅ Cleans up VPN and saves diagnostics
+ * ✅ Navigates to target FastPeopleSearch URL
+ * ✅ Waits for extension injection
+ * ✅ Captures screenshot & logs diagnostics
  */
 
 import fs from "fs";
@@ -19,11 +19,15 @@ const stateFile = path.join(vpnDir, ".vpn_state.json");
 const authFile = path.join(vpnDir, "auth.txt");
 const artifactsDir = path.resolve("artifacts/diagnostics");
 const screenshotsDir = path.resolve("artifacts/screenshots");
-const testPage = process.env.TEST_PAGE_URL || "http://127.0.0.1:8080/otment-test.html";
 const publicIPUrl = "https://ifconfig.co";
 const connectTimeoutSec = 60;
 
-// ensure dirs exist
+// Set default test URL if none provided
+const targetUrl =
+  process.env.TEST_PAGE_URL ||
+  "https://www.fastpeoplesearch.com/address/123-main-st_98001";
+
+// Ensure dirs exist
 fs.mkdirSync(artifactsDir, { recursive: true });
 fs.mkdirSync(screenshotsDir, { recursive: true });
 
@@ -73,7 +77,7 @@ async function connectVPN(configPath) {
     "--log", logFile
   ]);
 
-  // wait for tun0 to appear
+  // Wait for tun0 to appear
   let connected = false;
   for (let i = 0; i < connectTimeoutSec; i++) {
     await sleep(1000);
@@ -130,59 +134,30 @@ async function runBrowserAutomation(vpnName) {
 
   console.log("✅ Chrome started successfully.");
 
-  // === Verify extension loaded (with retries) ===
-  let extensions = [];
-  for (let i = 0; i < 5; i++) {
-    await sleep(1000);
-    const targets = await browser.targets();
-    extensions = targets.filter(t => t.url().startsWith("chrome-extension://"));
-    if (extensions.length) break;
-  }
-
-  if (extensions.length > 0) {
-    console.log("🧩 Chrome extensions detected:");
-    for (const t of extensions) console.log("   →", t.url());
-
-    try {
-      const match = extensions[0].url().match(/chrome-extension:\/\/([a-z]+)/);
-      if (match && match[1]) {
-        const extId = match[1];
-        console.log("✅ Extension ID:", extId);
-
-        // Attempt to read manifest.json
-        const extPage = await browser.newPage();
-        await extPage.goto(`chrome-extension://${extId}/manifest.json`);
-        const manifestText = await extPage.evaluate(() => document.body.innerText);
-        console.log("🧾 manifest.json preview:", manifestText.slice(0, 200));
-        await extPage.close();
-      }
-    } catch (err) {
-      console.warn("⚠️ Extension manifest validation failed:", err.message);
-    }
-  } else {
-    console.warn("⚠️ No extensions detected even after retries.");
+  // confirm extension loaded
+  const targets = await browser.targets();
+  const extensions = targets.filter(t =>
+    t.url().startsWith("chrome-extension://")
+  );
+  console.log("🔍 Loaded extensions:", extensions.map(t => t.url()));
+  if (!extensions.length) {
+    console.warn("⚠️ No extensions detected — extension may have failed to load.");
   }
 
   const page = await browser.newPage();
-  page.setDefaultTimeout(30000);
+  page.setDefaultTimeout(45000);
 
   try {
-    console.log(`🌍 Navigating to ${testPage}`);
-    await page.goto(testPage, { waitUntil: "networkidle2" });
+    console.log(`🌍 Navigating to ${targetUrl}`);
+    await page.goto(targetUrl, { waitUntil: "networkidle2" });
 
-    // wait for iframe & input
-    console.log("⏳ Waiting for iframe...");
-    await page.waitForSelector("iframe", { visible: true, timeout: 30000 });
-    const frameHandle = await page.$("iframe");
-    const frame = await frameHandle.contentFrame();
+    console.log("⏳ Waiting for extension to activate...");
+    // Wait for a signal element (you can customize this selector)
+    await page.waitForSelector("#otment-status, .otment-active", { timeout: 20000 }).catch(() => {
+      console.warn("⚠️ Extension marker not found, continuing anyway.");
+    });
 
-    console.log("⏳ Waiting for input...");
-    await frame.waitForSelector("input", { visible: true, timeout: 15000 });
-    console.log("🖱 Clicking input inside iframe...");
-    await frame.click("input");
-    await sleep(1000);
-
-    const shot = path.join(screenshotsDir, `iframe-clicked-${vpnName}.png`);
+    const shot = path.join(screenshotsDir, `fastpeoplesearch-${vpnName}.png`);
     await page.screenshot({ path: shot, fullPage: true });
     console.log(`📸 Screenshot saved: ${shot}`);
 
