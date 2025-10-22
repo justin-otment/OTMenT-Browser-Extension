@@ -18,6 +18,7 @@
     "express": "^5.1.0",
     "googleapis": "^159.0.0",
     "selenium-webdriver": "^4.35.0",
-    "uuidv4": "^6.2.13"
+    "uuidv4": "^6.2.13",
+    "puppeteer-core": "^21.0.0"
   }
 }
