@@ -11,15 +11,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: 🧩 Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: 🧱 Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install system dependencies
+      - name: 🧰 Install system dependencies
         run: |
           sudo apt-get update -y
           sudo apt-get install -y software-properties-common
@@ -30,14 +30,14 @@ jobs:
             libgbm-dev libnss3-dev libu2f-udev xdg-utils openvpn \
             iproute2 iputils-ping curl python3 python3-pip jq
 
-      - name: Setup Chrome (Chromium)
+      - name: 🌐 Setup Chrome (Chromium)
         uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: latest
           install-dependencies: true
           install-chromedriver: false
 
-      - name: Cache npm
+      - name: 💾 Cache npm
         uses: actions/cache@v4
         with:
           path: ~/.npm
@@ -45,7 +45,7 @@ jobs:
           restore-keys: |
             npm-cache-${{ runner.os }}-
 
-      - name: Install npm packages (robust)
+      - name: 📦 Install npm packages (robust)
         env:
           CI: true
         run: |
@@ -56,10 +56,9 @@ jobs:
           else
             echo "⚠ npm ci failed — falling back to npm install --legacy-peer-deps"
             npm install --legacy-peer-deps --no-audit --no-fund
-            echo "ℹ Reminder: run 'npm install' locally and commit updated package-lock.json to make CI deterministic"
           fi
 
-      - name: Locate Chrome binary
+      - name: 🕵️ Locate Chrome binary
         id: chrome-bin
         run: |
           CHROME_BIN=$(which google-chrome || which chromium || true)
@@ -73,15 +72,15 @@ jobs:
           echo "CHROME_BIN=$CHROME_BIN" >> $GITHUB_ENV
           "$CHROME_BIN" --version
 
-      - name: Ensure chromedriver (diagnostic)
+      - name: 🧪 Ensure chromedriver present (diagnostic)
         run: |
           ls -la node_modules/.bin || true
           node -e "console.log(require('chromedriver')?.path || 'chromedriver not found')" || true
 
-      - name: Prepare artifacts directories
+      - name: 🗂️ Prepare artifacts directories
         run: mkdir -p artifacts/{screenshots,diagnostics,videos}
 
-      - name: Verify or create test page
+      - name: 🧾 Ensure test page exists
         run: |
           if [ ! -f "otment-test.html" ]; then
             echo "⚠️ otment-test.html missing, creating fallback..."
@@ -90,17 +89,15 @@ jobs:
           <html lang="en">
           <head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
           <body>
-            <div id="otment-status">Initializing...</div>
-            <script>
-              setTimeout(()=>{document.getElementById('otment-status').classList.add('active');},1500);
-            </script>
+            <h3>OTMenT Puppeteer Test Page</h3>
+            <iframe id="test-frame" srcdoc="<input id='target-input' placeholder='Type here...' />" width="600" height="400"></iframe>
           </body>
           </html>
           EOF
-                    fi
-                    echo "✅ otment-test.html ready."
+          fi
+          echo "✅ otment-test.html ready."
 
-      - name: Start OpenVPN (rotate configs)
+      - name: 🔁 Rotate and connect OpenVPN
         env:
           CI: true
         run: |
@@ -139,7 +136,7 @@ jobs:
             sudo nohup openvpn --config "$NEXT" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
           fi
 
-          sleep 3
+          sleep 5
           [ -f "$PIDFILE" ] || { echo "❌ OpenVPN failed to start"; tail -n 50 "$LOGFILE"; exit 1; }
 
           echo "⏳ Waiting for tun0..."
@@ -155,7 +152,7 @@ jobs:
             echo "❌ VPN connection failed"; tail -n 100 "$LOGFILE"; exit 1;
           }
 
-      - name: Start local test server
+      - name: 🌍 Start local static server
         run: |
           npm install -g http-server@14
           nohup npx http-server -p 8080 -c-1 . > /tmp/http-server.log 2>&1 &
@@ -167,7 +164,7 @@ jobs:
             echo "❌ Test page not reachable"; cat /tmp/http-server.log; exit 1;
           }
 
-      - name: Prepare extension in runner (inject key from secret)
+      - name: ⚙️ Inject extension and Chrome args
         env:
           OTMENT_EXT_KEY_BASE64: ${{ secrets.OTMENT_EXT_KEY_BASE64 }}
         run: |
@@ -176,66 +173,42 @@ jobs:
           rm -rf "$TMP_EXT"
           mkdir -p "$TMP_EXT"
           cp -r "${GITHUB_WORKSPACE}/." "$TMP_EXT/"
+          sudo chmod -R 755 "$TMP_EXT" || true
+          echo "EXTENSION_PATH=$TMP_EXT" >> $GITHUB_ENV
+          echo "CHROME_ARGS=--no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080 --disable-extensions-except=$TMP_EXT --load-extension=$TMP_EXT" >> $GITHUB_ENV
+          echo "✅ Extension prepared."
 
-          if [ -n "${OTMENT_EXT_KEY_BASE64:-}" ]; then
-            python3 - <<'PY'
-          import json, os, sys
-          p = "/tmp/otment-extension/manifest.json"
-          b = os.environ.get("OTMENT_EXT_KEY_BASE64")
-          try:
-              m = json.load(open(p))
-          except Exception as e:
-              print("ERROR: failed to read manifest.json:", e)
-              sys.exit(1)
-          if "key" not in m:
-              m2 = {"manifest_version": m.get("manifest_version", 3), "key": b}
-              for k, v in m.items():
-                  if k != "manifest_version":
-                      m2[k] = v
-              open(p, "w").write(json.dumps(m2, indent=2))
-          else:
-              print("manifest already has key")
-          PY
-                    else
-                      echo "No OTMENT_EXT_KEY_BASE64 provided"
-                    fi
-          
-                    sudo chmod -R 755 "$TMP_EXT" || true
-                    echo "EXTENSION_PATH=${TMP_EXT}" >> $GITHUB_ENV
-                    echo "CHROME_ARGS=--disable-extensions-except=${TMP_EXT} --load-extension=${TMP_EXT} --no-sandbox --disable-dev-shm-usage --window-size=1920,1080" >> $GITHUB_ENV
-
-      - name: Debug injected extension contents
-        run: |
-          echo "EXTENSION_PATH=$EXTENSION_PATH"
-          echo "CHROME_ARGS=$CHROME_ARGS"
-          echo "Listing extension files:"
-          ls -la "$EXTENSION_PATH" || true
-          echo "--- manifest.json ---"
-          jq . "$EXTENSION_PATH/manifest.json" || cat "$EXTENSION_PATH/manifest.json" || true
-          echo "--- key field (single line) ---"
-          jq -r '.key // "NO_KEY"' "$EXTENSION_PATH/manifest.json" || true
-          echo "--- check main scripts ---"
-          for f in background.js background.mjs service_worker.js service-worker.js; do
-            [ -f "$EXTENSION_PATH/$f" ] && echo "FOUND: $f" && head -n 40 "$EXTENSION_PATH/$f"
-          done
-          echo "--- ensure readable ---"
-          sudo chmod -R 755 "$EXTENSION_PATH" || true
-
-      - name: Export Chrome args (legacy fallback)
-        run: |
-          echo "TEST_PAGE_URL=https://www.fastpeoplesearch.com/address/123-main-st_98001" >> $GITHUB_ENV
-
-      - name: Run headed tests under Xvfb (with debug + Chrome path export)
+      - name: 🚀 Run Puppeteer orchestrator
         env:
           CI: true
-          TEST_PAGE_URL: ${{ env.TEST_PAGE_URL }}
-          CHROME_ARGS: ${{ env.CHROME_ARGS }}
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
+          CHROME_PATH: ${{ env.CHROME_BIN }}
+          TEST_PAGE_URL: "http://127.0.0.1:8080/otment-test.html"
           DEBUG: puppeteer:*
         run: |
-          set -euo pipefail
-          CHROME_PATH="${{ env.CHROME_BIN }}"
-          if [ -z "$CHROME_PATH" ]; then
-            CHROME_PATH=$(which google-chrome || which chromium || find /opt/hostedtoolcache/setup-chrome -type f -name chrome | head -n1)
-          fi
-          echo "Using CHROME_PATH: $CHROME_PATH"
+          echo "🚀 Launching Puppeteer (explicit Chrome path)..."
+          export PUPPETEER_EXECUTABLE_PATH="${CHROME_PATH}"
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" node scripts/orchestrator.js
+        timeout-minutes: 35
+
+      - name: 🧾 Collect diagnostics and screenshots
+        if: always()
+        run: |
+          ls -la artifacts/screenshots || true
+          [ -f /tmp/openvpn.log ] && cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
+
+      - name: 🔌 Disconnect VPN
+        if: always()
+        run: |
+          sudo pkill -f openvpn || true
+          echo "✅ VPN disconnected."
+
+      - name: 📤 Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-artifacts
+          path: |
+            artifacts/diagnostics/**
+            artifacts/screenshots/**
+            artifacts/videos/**
