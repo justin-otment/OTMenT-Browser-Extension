@@ -13,7 +13,7 @@
 import fs from "fs";
 import path from "path";
 import { execSync, spawn } from "child_process";
-import puppeteer from "puppeteer-core";
+import puppeteer from 'puppeteer-core';
 
 const vpnDir = path.resolve("VPN");
 const stateFile = path.join(vpnDir, ".vpn_state.json");
@@ -125,16 +125,11 @@ async function disconnectVPN() {
 // === Browser Automation ===
 async function runBrowserAutomation(vpnName) {
   console.log(`🧠 Launching Chrome automation for ${vpnName}...`);
+
   const browser = await puppeteer.launch({
     headless: false,
-    args: [
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--window-size=1920,1080",
-      `--disable-extensions-except=${process.cwd()}`,
-      `--load-extension=${process.cwd()}`,
-    ],
+    executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome',
+    args: (process.env.CHROME_ARGS || '').split(' '),
   });
 
   const page = await browser.newPage();
@@ -210,4 +205,5 @@ async function runBrowserAutomation(vpnName) {
     console.log("✅ Rotation state updated.");
   }
 })();
+
 
