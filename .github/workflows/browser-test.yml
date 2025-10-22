@@ -180,8 +180,15 @@ jobs:
           node -e "console.log('Puppeteer will use:', process.env.CHROME_PATH)"
 
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed || RC=$?
+
           mkdir -p artifacts/diagnostics
-          sudo cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log 2>/dev/null || true
+          if [ -f /tmp/openvpn.log ]; then
+            # Copy log safely and fix ownership for upload
+            sudo cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
+            sudo chmod 644 artifacts/diagnostics/openvpn.log || true
+            sudo chown $(whoami):$(whoami) artifacts/diagnostics/openvpn.log || true
+          fi
+
           exit ${RC:-0}
         timeout-minutes: 30
 
@@ -209,6 +216,10 @@ jobs:
 
       - name: Upload artifacts
         if: always()
+        run: |
+          echo "Fixing permissions before upload..."
+          sudo chmod -R 755 artifacts || true
+          sudo chown -R $(whoami):$(whoami) artifacts || true
         uses: actions/upload-artifact@v4
         with:
           name: browser-artifacts
