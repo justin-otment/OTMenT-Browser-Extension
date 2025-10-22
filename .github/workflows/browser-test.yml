@@ -168,24 +168,25 @@ jobs:
 
           if [ -n "${OTMENT_EXT_KEY_BASE64:-}" ]; then
             python3 - <<'PY'
-import json, os, sys
-p="/tmp/otment-extension/manifest.json"
-m=json.load(open(p))
-if "key" not in m:
-    m2={"manifest_version": m.get("manifest_version",3), "key": "${OTMENT_EXT_KEY_BASE64}"}
-    for k,v in m.items():
-        if k!="manifest_version":
-            m2[k]=v
-    open(p,"w").write(json.dumps(m2,indent=2))
-else:
-    print("manifest already has key")
-PY
-          else
-            echo "No OTMENT_EXT_KEY_BASE64 provided"
-          fi
-
-          echo "EXTENSION_PATH=${TMP_EXT}" >> $GITHUB_ENV
-          echo "CHROME_ARGS=--disable-extensions-except=${TMP_EXT} --load-extension=${TMP_EXT} --no-sandbox --disable-dev-shm-usage --window-size=1920,1080" >> $GITHUB_ENV
+          import json, os
+          p = "/tmp/otment-extension/manifest.json"
+          b = os.environ.get("OTMENT_EXT_KEY_BASE64")
+          m = json.load(open(p))
+          if "key" not in m:
+              m2 = {"manifest_version": m.get("manifest_version", 3), "key": b}
+              for k, v in m.items():
+                  if k != "manifest_version":
+                      m2[k] = v
+              open(p, "w").write(json.dumps(m2, indent=2))
+          else:
+              print("manifest already has key")
+          PY
+                    else
+                      echo "No OTMENT_EXT_KEY_BASE64 provided"
+                    fi
+          
+                    echo "EXTENSION_PATH=${TMP_EXT}" >> $GITHUB_ENV
+                    echo "CHROME_ARGS=--disable-extensions-except=${TMP_EXT} --load-extension=${TMP_EXT} --no-sandbox --disable-dev-shm-usage --window-size=1920,1080" >> $GITHUB_ENV
 
       - name: Export Chrome args (legacy fallback)
         run: |
