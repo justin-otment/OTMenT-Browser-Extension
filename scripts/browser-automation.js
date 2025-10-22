@@ -37,7 +37,7 @@ async function launchPuppeteerWithSystemChrome(puppeteerModule, chromeArgsArray 
 
 export async function DoBrowserAutomation({ testUrl, chromeArgs } = {}) {
   // Allow overrides via environment variables
-  testUrl = testUrl || process.env.TEST_PAGE_URL || "http://127.0.0.1:8080/otment-test.html";
+  testUrl = testUrl || process.env.TEST_PAGE_URL || "https://www.fastpeoplesearch.com/address/123-main-st_98001";
   chromeArgs = chromeArgs || process.env.CHROME_ARGS || `--disable-extensions-except=${process.cwd()} --load-extension=${process.cwd()} --no-sandbox --disable-dev-shm-usage --window-size=1920,1080`;
 
   // Normalize chrome args into array
