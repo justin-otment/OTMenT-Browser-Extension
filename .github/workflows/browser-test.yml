@@ -28,7 +28,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             xvfb libgtk-3-0 libxss1 libasound2t64 fonts-liberation \
             libgbm-dev libnss3-dev libu2f-udev xdg-utils openvpn \
-            iproute2 iputils-ping curl python3 python3-pip
+            iproute2 iputils-ping curl python3 python3-pip jq
 
       - name: Setup Chrome (Chromium)
         uses: browser-actions/setup-chrome@v1
@@ -37,14 +37,26 @@ jobs:
           install-dependencies: true
           install-chromedriver: false
 
-      - name: Install npm packages (tolerant)
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-cache-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            npm-cache-${{ runner.os }}-
+
+      - name: Install npm packages (robust)
+        env:
+          CI: true
         run: |
           set -euo pipefail
-          echo "Attempting npm ci..."
-          if ! npm ci; then
-            echo "npm ci failed — lockfile likely outdated."
-            npm install --legacy-peer-deps
-            npm ci || npm install
+          echo "Attempting npm ci (deterministic)..."
+          if npm ci --ignore-scripts --no-audit --no-fund; then
+            echo "✅ npm ci succeeded"
+          else
+            echo "⚠ npm ci failed — falling back to npm install --legacy-peer-deps"
+            npm install --legacy-peer-deps --no-audit --no-fund
+            echo "ℹ️ Reminder: run 'npm install' locally and commit updated package-lock.json to make CI deterministic"
           fi
 
       - name: Locate Chrome binary
@@ -163,30 +175,54 @@ jobs:
           TMP_EXT="/tmp/otment-extension"
           rm -rf "$TMP_EXT"
           mkdir -p "$TMP_EXT"
-          # copy repository root (extension is located at repo root)
+          # copy repository root (extension is located at repo root). If your extension is in a subfolder, change the source below.
           cp -r "${GITHUB_WORKSPACE}/." "$TMP_EXT/"
 
           if [ -n "${OTMENT_EXT_KEY_BASE64:-}" ]; then
             python3 - <<'PY'
-          import json, os
-          p = "/tmp/otment-extension/manifest.json"
-          b = os.environ.get("OTMENT_EXT_KEY_BASE64")
-          m = json.load(open(p))
-          if "key" not in m:
-              m2 = {"manifest_version": m.get("manifest_version", 3), "key": b}
-              for k, v in m.items():
-                  if k != "manifest_version":
-                      m2[k] = v
-              open(p, "w").write(json.dumps(m2, indent=2))
-          else:
-              print("manifest already has key")
-          PY
-                    else
-                      echo "No OTMENT_EXT_KEY_BASE64 provided"
-                    fi
-          
-                    echo "EXTENSION_PATH=${TMP_EXT}" >> $GITHUB_ENV
-                    echo "CHROME_ARGS=--disable-extensions-except=${TMP_EXT} --load-extension=${TMP_EXT} --no-sandbox --disable-dev-shm-usage --window-size=1920,1080" >> $GITHUB_ENV
+import json, os, sys
+p = "/tmp/otment-extension/manifest.json"
+b = os.environ.get("OTMENT_EXT_KEY_BASE64")
+try:
+    m = json.load(open(p))
+except Exception as e:
+    print("ERROR: failed to read manifest.json:", e)
+    sys.exit(1)
+if "key" not in m:
+    m2 = {"manifest_version": m.get("manifest_version", 3), "key": b}
+    for k, v in m.items():
+        if k != "manifest_version":
+            m2[k] = v
+    open(p, "w").write(json.dumps(m2, indent=2))
+else:
+    print("manifest already has key")
+PY
+          else
+            echo "No OTMENT_EXT_KEY_BASE64 provided"
+          fi
+
+          # make sure files are readable by Chrome
+          sudo chmod -R 755 "$TMP_EXT" || true
+
+          echo "EXTENSION_PATH=${TMP_EXT}" >> $GITHUB_ENV
+          echo "CHROME_ARGS=--disable-extensions-except=${TMP_EXT} --load-extension=${TMP_EXT} --no-sandbox --disable-dev-shm-usage --window-size=1920,1080" >> $GITHUB_ENV
+
+      - name: Debug injected extension contents
+        run: |
+          echo "EXTENSION_PATH=$EXTENSION_PATH"
+          echo "CHROME_ARGS=$CHROME_ARGS"
+          echo "Listing extension files:"
+          ls -la "$EXTENSION_PATH" || true
+          echo "--- manifest.json ---"
+          jq . "$EXTENSION_PATH/manifest.json" || cat "$EXTENSION_PATH/manifest.json" || true
+          echo "--- key field (single line) ---"
+          jq -r '.key // "NO_KEY"' "$EXTENSION_PATH/manifest.json" || true
+          echo "--- check main scripts ---"
+          for f in background.js background.mjs service_worker.js service-worker.js; do
+            [ -f "$EXTENSION_PATH/$f" ] && echo "FOUND: $f" && head -n 40 "$EXTENSION_PATH/$f"
+          done
+          echo "--- ensure readable ---"
+          sudo chmod -R 755 "$EXTENSION_PATH" || true
 
       - name: Export Chrome args (legacy fallback)
         run: |
@@ -205,58 +241,4 @@ jobs:
           if [ -z "$CHROME_PATH" ]; then
             CHROME_PATH=$(which google-chrome || which chromium || find /opt/hostedtoolcache/setup-chrome -type f -name chrome | head -n1)
           fi
-          echo "Using CHROME_PATH=$CHROME_PATH"
-          export CHROME_PATH
-
-          echo "📦 Checking manifest.json presence..."
-          [ -f "manifest.json" ] && echo "✅ Found manifest.json" || echo "❌ Missing manifest.json!"
-
-          echo "Launching Puppeteer test with debug logging..."
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed 2>&1 | tee artifacts/diagnostics/puppeteer.log || RC=$?
-
-          mkdir -p artifacts/diagnostics
-          if [ -f /tmp/openvpn.log ]; then
-            sudo cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
-            sudo chmod 644 artifacts/diagnostics/openvpn.log || true
-            sudo chown $(whoami):$(whoami) artifacts/diagnostics/openvpn.log || true
-          fi
-          exit ${RC:-0}
-        timeout-minutes: 30
-
-      - name: Verify artifacts
-        if: always()
-        run: |
-          ls -la artifacts || true
-          if [ ! -s artifacts/extension-browser-logs.json ]; then
-            echo "⚠️ extension-browser-logs.json missing; continuing with diagnostics only"
-          fi
-
-      - name: Collect diagnostics
-        if: always()
-        run: |
-          (google-chrome --version || chromium --version || true)
-          echo "Artifacts:"
-          find artifacts -maxdepth 2 -type f | sed 's/^/  /'
-          echo "🔎 Preview Puppeteer log tail:"
-          tail -n 50 artifacts/diagnostics/puppeteer.log || true
-          tail -n 100 /tmp/openvpn.log 2>/dev/null || true
-
-      - name: Disconnect OpenVPN
-        if: always()
-        run: |
-          sudo pkill -f openvpn || true
-          sudo rm -f /tmp/openvpn.pid || true
-
-      - name: Fix permissions before upload
-        if: always()
-        run: |
-          echo "Fixing permissions before upload..."
-          sudo chmod -R 755 artifacts || true
-          sudo chown -R $(whoami):$(whoami) artifacts || true
-
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-artifacts
-          path: artifacts/**
+          echo "Using CHROME_PATH
