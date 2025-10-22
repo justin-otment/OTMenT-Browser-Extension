@@ -50,12 +50,16 @@ jobs:
       - name: Locate Chrome binary
         id: chrome-bin
         run: |
-          CHROME_BIN=$(which chromium || which google-chrome || echo "")
+          CHROME_BIN=$(which google-chrome || which chromium || true)
           if [ -z "$CHROME_BIN" ]; then
             CHROME_BIN=$(find /opt/hostedtoolcache/setup-chrome -type f -name chrome | head -n1)
           fi
-          echo "CHROME_BIN=$CHROME_BIN" | tee -a $GITHUB_ENV
-          echo "Using Chrome binary: $CHROME_BIN"
+          if [ -z "$CHROME_BIN" ]; then
+            echo "❌ Chrome binary not found."; exit 1
+          fi
+          echo "✅ Using Chrome binary: $CHROME_BIN"
+          echo "CHROME_BIN=$CHROME_BIN" >> $GITHUB_ENV
+          "$CHROME_BIN" --version
 
       - name: Ensure chromedriver (diagnostic)
         run: |
@@ -156,15 +160,25 @@ jobs:
           echo "TEST_PAGE_URL=http://127.0.0.1:8080/otment-test.html" >> $GITHUB_ENV
           echo "CHROME_ARGS=--disable-extensions-except=${PWD} --load-extension=${PWD} --enable-unsafe-swiftshader --no-sandbox --disable-dev-shm-usage --window-size=1920,1080" >> $GITHUB_ENV
 
-      - name: Run headed tests under Xvfb
+      - name: Run headed tests under Xvfb (with Chrome path export)
         env:
           CI: true
           TEST_PAGE_URL: ${{ env.TEST_PAGE_URL }}
           CHROME_ARGS: ${{ env.CHROME_ARGS }}
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
-          CHROME_PATH: ${{ env.CHROME_BIN }}
         run: |
           set -euo pipefail
+          # ensure Chrome path exported for puppeteer-core
+          CHROME_PATH="${{ env.CHROME_BIN }}"
+          if [ -z "$CHROME_PATH" ]; then
+            CHROME_PATH=$(which google-chrome || which chromium || find /opt/hostedtoolcache/setup-chrome -type f -name chrome | head -n1)
+          fi
+          echo "Using CHROME_PATH=$CHROME_PATH"
+          export CHROME_PATH
+
+          "$CHROME_PATH" --version || true
+          node -e "console.log('Puppeteer will use:', process.env.CHROME_PATH)"
+
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed || RC=$?
           mkdir -p artifacts/diagnostics
           sudo cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log 2>/dev/null || true
