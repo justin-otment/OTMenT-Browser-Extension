@@ -157,7 +157,7 @@ jobs:
 
       - name: Export Chrome args
         run: |
-          echo "TEST_PAGE_URL=http://127.0.0.1:8080/otment-test.html" >> $GITHUB_ENV
+          echo "TEST_PAGE_URL=https://www.fastpeoplesearch.com/address/123-main-st_98001" >> $GITHUB_ENV
           echo "CHROME_ARGS=--disable-extensions-except=${PWD} --load-extension=${PWD} --enable-unsafe-swiftshader --no-sandbox --disable-dev-shm-usage --window-size=1920,1080" >> $GITHUB_ENV
 
       - name: Run headed tests under Xvfb (with debug + Chrome path export)
