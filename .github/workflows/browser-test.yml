@@ -168,7 +168,6 @@ jobs:
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
         run: |
           set -euo pipefail
-          # ensure Chrome path exported for puppeteer-core
           CHROME_PATH="${{ env.CHROME_BIN }}"
           if [ -z "$CHROME_PATH" ]; then
             CHROME_PATH=$(which google-chrome || which chromium || find /opt/hostedtoolcache/setup-chrome -type f -name chrome | head -n1)
@@ -180,15 +179,12 @@ jobs:
           node -e "console.log('Puppeteer will use:', process.env.CHROME_PATH)"
 
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed || RC=$?
-
           mkdir -p artifacts/diagnostics
           if [ -f /tmp/openvpn.log ]; then
-            # Copy log safely and fix ownership for upload
             sudo cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
             sudo chmod 644 artifacts/diagnostics/openvpn.log || true
             sudo chown $(whoami):$(whoami) artifacts/diagnostics/openvpn.log || true
           fi
-
           exit ${RC:-0}
         timeout-minutes: 30
 
@@ -214,14 +210,16 @@ jobs:
           sudo pkill -f openvpn || true
           sudo rm -f /tmp/openvpn.pid || true
 
-      - name: Upload artifacts
+      - name: Fix permissions before upload
         if: always()
         run: |
           echo "Fixing permissions before upload..."
           sudo chmod -R 755 artifacts || true
           sudo chown -R $(whoami):$(whoami) artifacts || true
-          uses: actions/upload-artifact@v4
-          with:
-            name: browser-artifacts
-            path: artifacts/**
 
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-artifacts
+          path: artifacts/**
