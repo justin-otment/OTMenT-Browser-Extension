@@ -160,12 +160,13 @@ jobs:
           echo "TEST_PAGE_URL=http://127.0.0.1:8080/otment-test.html" >> $GITHUB_ENV
           echo "CHROME_ARGS=--disable-extensions-except=${PWD} --load-extension=${PWD} --enable-unsafe-swiftshader --no-sandbox --disable-dev-shm-usage --window-size=1920,1080" >> $GITHUB_ENV
 
-      - name: Run headed tests under Xvfb (with Chrome path export)
+      - name: Run headed tests under Xvfb (with debug + Chrome path export)
         env:
           CI: true
           TEST_PAGE_URL: ${{ env.TEST_PAGE_URL }}
           CHROME_ARGS: ${{ env.CHROME_ARGS }}
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
+          DEBUG: puppeteer:*
         run: |
           set -euo pipefail
           CHROME_PATH="${{ env.CHROME_BIN }}"
@@ -175,10 +176,12 @@ jobs:
           echo "Using CHROME_PATH=$CHROME_PATH"
           export CHROME_PATH
 
-          "$CHROME_PATH" --version || true
-          node -e "console.log('Puppeteer will use:', process.env.CHROME_PATH)"
+          echo "📦 Checking manifest.json presence..."
+          [ -f "manifest.json" ] && echo "✅ Found manifest.json" || echo "❌ Missing manifest.json!"
 
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed || RC=$?
+          echo "Launching Puppeteer test with debug logging..."
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed 2>&1 | tee artifacts/diagnostics/puppeteer.log || RC=$?
+
           mkdir -p artifacts/diagnostics
           if [ -f /tmp/openvpn.log ]; then
             sudo cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
@@ -202,6 +205,8 @@ jobs:
           (google-chrome --version || chromium --version || true)
           echo "Artifacts:"
           find artifacts -maxdepth 2 -type f | sed 's/^/  /'
+          echo "🔎 Preview Puppeteer log tail:"
+          tail -n 50 artifacts/diagnostics/puppeteer.log || true
           tail -n 100 /tmp/openvpn.log 2>/dev/null || true
 
       - name: Disconnect OpenVPN
