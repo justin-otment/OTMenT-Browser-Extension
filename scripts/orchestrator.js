@@ -1,13 +1,12 @@
 /**
- * Orchestrator.js — Linux/GitHub Actions-safe automation
+ * Orchestrator.js — Enhanced Puppeteer + VPN automation
  * -----------------------------------------------------------
- * ✅ Rotates through VPN configs
- * ✅ Connects to OpenVPN
- * ✅ Verifies new external IP
- * ✅ Launches Chrome (Puppeteer) with unpacked extension
- * ✅ Confirms extension load
- * ✅ Waits for iframe + input, clicks, screenshots
- * ✅ Cleans up VPN tunnel
+ * ✅ Rotates VPN configs safely
+ * ✅ Connects via OpenVPN & verifies new IP
+ * ✅ Launches Chrome with unpacked extension (root dir)
+ * ✅ Confirms extension loaded
+ * ✅ Automates test page interaction & screenshot
+ * ✅ Cleans up VPN and saves diagnostics
  */
 
 import fs from "fs";
@@ -20,15 +19,14 @@ const stateFile = path.join(vpnDir, ".vpn_state.json");
 const authFile = path.join(vpnDir, "auth.txt");
 const artifactsDir = path.resolve("artifacts/diagnostics");
 const screenshotsDir = path.resolve("artifacts/screenshots");
-const testPage = "http://127.0.0.1:8080/otment-test.html";
+const testPage = process.env.TEST_PAGE_URL || "http://127.0.0.1:8080/otment-test.html";
 const publicIPUrl = "https://ifconfig.co";
 const connectTimeoutSec = 60;
 
-// Ensure directories exist
+// ensure dirs exist
 fs.mkdirSync(artifactsDir, { recursive: true });
 fs.mkdirSync(screenshotsDir, { recursive: true });
 
-// === Helpers ===
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function getExternalIP() {
@@ -40,10 +38,9 @@ function getExternalIP() {
 }
 
 function listVpnConfigs() {
-  return fs
-    .readdirSync(vpnDir)
-    .filter((f) => f.endsWith(".ovpn"))
-    .map((f) => path.join(vpnDir, f));
+  return fs.readdirSync(vpnDir)
+    .filter(f => f.endsWith(".ovpn"))
+    .map(f => path.join(vpnDir, f));
 }
 
 function loadRotationState() {
@@ -61,29 +58,22 @@ async function connectVPN(configPath) {
   const logFile = "/tmp/openvpn.log";
   const pidFile = "/tmp/openvpn.pid";
 
-  // stop previous VPN if any
-  try {
-    execSync("sudo pkill -f openvpn || true");
-  } catch {}
+  try { execSync("sudo pkill -f openvpn || true"); } catch {}
 
   console.log(`🌐 Connecting VPN: ${path.basename(configPath)}`);
   const baseIP = getExternalIP();
   console.log(`Current IP: ${baseIP}`);
 
-  const proc = spawn("sudo", [
+  spawn("sudo", [
     "openvpn",
-    "--config",
-    configPath,
-    "--auth-user-pass",
-    authFile,
+    "--config", configPath,
+    "--auth-user-pass", authFile,
     "--daemon",
-    "--writepid",
-    pidFile,
-    "--log",
-    logFile,
+    "--writepid", pidFile,
+    "--log", logFile
   ]);
 
-  // wait for tun0
+  // wait for tun0 to appear
   let connected = false;
   for (let i = 0; i < connectTimeoutSec; i++) {
     await sleep(1000);
@@ -98,15 +88,12 @@ async function connectVPN(configPath) {
 
   if (!connected) {
     console.log("❌ VPN failed to connect within timeout.");
-    try {
-      console.log(fs.readFileSync(logFile, "utf8"));
-    } catch {}
+    try { console.log(fs.readFileSync(logFile, "utf8")); } catch {}
     throw new Error("VPN connection timeout");
   }
 
   const vpnIP = getExternalIP();
   console.log(`VPN external IP: ${vpnIP}`);
-
   if (vpnIP === baseIP || vpnIP === "unknown") {
     throw new Error("VPN did not change external IP.");
   }
@@ -116,9 +103,7 @@ async function connectVPN(configPath) {
 }
 
 async function disconnectVPN() {
-  try {
-    execSync("sudo pkill -f openvpn || true");
-  } catch {}
+  try { execSync("sudo pkill -f openvpn || true"); } catch {}
   console.log("🔌 VPN disconnected.");
 }
 
@@ -127,35 +112,32 @@ async function runBrowserAutomation(vpnName) {
   console.log(`🧠 Launching Chrome automation for ${vpnName}...`);
 
   const chromePath = process.env.CHROME_PATH || "/usr/bin/google-chrome";
-  const chromeArgs = (process.env.CHROME_ARGS || "").split(" ").filter(Boolean);
-
-  console.log("➡️ Chrome path:", chromePath);
-  console.log("➡️ Chrome args:", chromeArgs.join(" "));
+  const chromeArgs = (process.env.CHROME_ARGS || "").split(" ");
 
   const browser = await puppeteer.launch({
     headless: false,
     executablePath: chromePath,
-    args: chromeArgs,
-    ignoreDefaultArgs: ["--disable-extensions"], // ✅ critical: allow unpacked extensions
+    args: [
+      ...chromeArgs,
+      "--enable-automation",
+      "--allow-insecure-localhost",
+      "--ignore-certificate-errors",
+      "--enable-extensions",
+      "--user-data-dir=/tmp/chrome-profile"
+    ],
+    ignoreDefaultArgs: ["--disable-extensions", "--headless"],
   });
 
-  // === Verify Extension Loaded ===
-  try {
-    const targets = await browser.targets();
-    const extensions = targets.filter((t) =>
-      t.url().startsWith("chrome-extension://")
-    );
+  console.log("✅ Chrome started successfully.");
 
-    if (extensions.length > 0) {
-      console.log(
-        "🧩 Loaded extensions:",
-        extensions.map((t) => t.url()).join(", ")
-      );
-    } else {
-      console.warn("⚠️ No extensions detected. Check manifest or args path.");
-    }
-  } catch (e) {
-    console.warn("⚠️ Could not verify extensions:", e.message);
+  // confirm extension loaded
+  const targets = await browser.targets();
+  const extensions = targets.filter(t =>
+    t.url().startsWith("chrome-extension://")
+  );
+  console.log("🔍 Loaded extensions:", extensions.map(t => t.url()));
+  if (!extensions.length) {
+    console.warn("⚠️ No extensions detected — extension may have failed to load.");
   }
 
   const page = await browser.newPage();
@@ -165,14 +147,14 @@ async function runBrowserAutomation(vpnName) {
     console.log(`🌍 Navigating to ${testPage}`);
     await page.goto(testPage, { waitUntil: "networkidle2" });
 
+    // wait for iframe & input
     console.log("⏳ Waiting for iframe...");
     await page.waitForSelector("iframe", { visible: true, timeout: 30000 });
     const frameHandle = await page.$("iframe");
     const frame = await frameHandle.contentFrame();
 
-    console.log("⏳ Waiting for input inside iframe...");
+    console.log("⏳ Waiting for input...");
     await frame.waitForSelector("input", { visible: true, timeout: 15000 });
-
     console.log("🖱 Clicking input inside iframe...");
     await frame.click("input");
     await sleep(1000);
@@ -181,43 +163,35 @@ async function runBrowserAutomation(vpnName) {
     await page.screenshot({ path: shot, fullPage: true });
     console.log(`📸 Screenshot saved: ${shot}`);
 
-    // Simulate reloads for stability
-    for (let i = 0; i < 2; i++) {
-      await page.reload({ waitUntil: "domcontentloaded" });
-      await sleep(1000);
-    }
   } catch (err) {
     console.error("❌ Browser automation failed:", err.message);
   } finally {
     await browser.close();
+    console.log("🧹 Browser session closed.");
   }
 }
 
 // === Main ===
 (async () => {
   const allConfigs = listVpnConfigs();
-  if (allConfigs.length === 0) {
+  if (!allConfigs.length) {
     console.error("No VPN configs found in /VPN/");
     process.exit(1);
   }
 
-  let state = loadRotationState();
-  const remaining = allConfigs.filter(
-    (cfg) => !state.used.includes(path.basename(cfg))
-  );
-
-  const nextConfig =
-    remaining.length > 0 ? remaining[0] : allConfigs[0]; // reset if done
+  const state = loadRotationState();
+  const remaining = allConfigs.filter(cfg => !state.used.includes(path.basename(cfg)));
+  const nextConfig = remaining.length ? remaining[0] : allConfigs[0];
   const vpnName = path.basename(nextConfig).replace(/\.ovpn$/, "");
 
   console.log(`🔁 Selected VPN: ${vpnName}`);
-  if (remaining.length === 0) {
+  if (!remaining.length) {
     console.log("🔄 Resetting rotation — all configs used.");
     state.used = [];
   }
 
   try {
-    const vpnInfo = await connectVPN(nextConfig);
+    await connectVPN(nextConfig);
     await runBrowserAutomation(vpnName);
   } catch (err) {
     console.error("❌ Error:", err.message);
