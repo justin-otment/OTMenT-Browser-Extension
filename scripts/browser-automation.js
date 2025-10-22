@@ -3,7 +3,7 @@
 // Designed for non-headless use in CI under Xvfb (your workflow already starts Xvfb).
 // Exports DoBrowserAutomation which performs one run and resolves when done.
 
-import puppeteer from "puppeteer";
+import puppeteer from "puppeteer-core";
 import { join } from "path";
 import fs from "fs";
 
