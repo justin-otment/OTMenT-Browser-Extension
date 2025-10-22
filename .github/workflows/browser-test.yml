@@ -47,8 +47,18 @@ jobs:
           chrome-version: latest
           install-dependencies: true
 
-      - name: Install npm packages
-        run: npm ci
+      - name: Install npm packages (tolerant)
+        run: |
+          # Prefer clean CI install but fall back to an install-and-retry if lockfile is out of sync.
+          set -euo pipefail
+          echo "Attempting npm ci (strict lockfile install)..."
+          if npm ci; then
+            echo "npm ci succeeded"
+          else
+            echo "npm ci failed; attempting npm install to refresh lockfile, then npm ci"
+            npm install
+            npm ci
+          fi
 
       - name: Ensure chromedriver is available (npm)
         run: |
@@ -92,8 +102,8 @@ jobs:
           </body>
           </html>
           EOF
-                    fi
-                    echo "✅ Verified otment-test.html present."
+          fi
+          echo "✅ Verified otment-test.html present."
 
       - name: Rotate and start OpenVPN connection
         env:
@@ -214,8 +224,20 @@ jobs:
           GITHUB_REF_NAME: ${{ github.ref_name }}
           TEST_PAGE_URL: ${{ env.TEST_PAGE_URL }}
           CHROME_ARGS: ${{ env.CHROME_ARGS }}
+          # Use puppeteer-core + system Chrome; avoid downloading Chromium during CI
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
+          CHROME_PATH: "/usr/bin/google-chrome"
         run: |
+          set -euo pipefail
+          # run tests but always capture exit code so we can collect diagnostics
+          set +e
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run test:headed
+          rc=$?
+          set -e
+          # ensure artifacts dirs exist and capture OpenVPN log with sudo if needed
+          mkdir -p artifacts/diagnostics artifacts/screenshots artifacts/videos
+          sudo cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log 2>/dev/null || true
+          exit $rc
         timeout-minutes: 30
         continue-on-error: false
 
@@ -227,7 +249,7 @@ jobs:
           if [ ! -s artifacts/extension-browser-logs.json ]; then
             echo "ERROR: artifacts/extension-browser-logs.json missing or empty" >&2
             mkdir -p artifacts/diagnostics
-            [ -f /tmp/openvpn.log ] && cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
+            sudo cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log 2>/dev/null || true
             exit 1
           fi
 
@@ -245,7 +267,7 @@ jobs:
           ls -la artifacts/screenshots || true
           if [ -f /tmp/openvpn.log ]; then
             tail -n 200 /tmp/openvpn.log || true
-            cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
+            sudo cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
           fi
 
       - name: Disconnect OpenVPN (cleanup)
@@ -255,9 +277,9 @@ jobs:
           if [ -f "$PIDFILE" ]; then
             pid=$(cat "$PIDFILE") || true
             [ -n "$pid" ] && sudo kill "$pid" || true
-            rm -f "$PIDFILE" || true
+            sudo rm -f "$PIDFILE" || true
           fi
-          pkill -f openvpn || true
+          sudo pkill -f openvpn || true
 
       - name: Upload artifacts
         if: always()
