@@ -56,7 +56,7 @@ jobs:
           else
             echo "⚠ npm ci failed — falling back to npm install --legacy-peer-deps"
             npm install --legacy-peer-deps --no-audit --no-fund
-            echo "ℹ️ Reminder: run 'npm install' locally and commit updated package-lock.json to make CI deterministic"
+            echo "ℹ Reminder: run 'npm install' locally and commit updated package-lock.json to make CI deterministic"
           fi
 
       - name: Locate Chrome binary
@@ -86,17 +86,17 @@ jobs:
           if [ ! -f "otment-test.html" ]; then
             echo "⚠️ otment-test.html missing, creating fallback..."
             cat <<'EOF' > otment-test.html
-          <!DOCTYPE html>
-          <html lang="en">
-          <head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
-          <body>
-            <div id="otment-status">Initializing...</div>
-            <script>
-              setTimeout(()=>{document.getElementById('otment-status').classList.add('active');},1500);
-            </script>
-          </body>
-          </html>
-          EOF
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
+<body>
+  <div id="otment-status">Initializing...</div>
+  <script>
+    setTimeout(()=>{document.getElementById('otment-status').classList.add('active');},1500);
+  </script>
+</body>
+</html>
+EOF
           fi
           echo "✅ otment-test.html ready."
 
@@ -175,54 +175,51 @@ jobs:
           TMP_EXT="/tmp/otment-extension"
           rm -rf "$TMP_EXT"
           mkdir -p "$TMP_EXT"
-          # copy repository root (extension is located at repo root). If your extension is in a subfolder, change the source below.
           cp -r "${GITHUB_WORKSPACE}/." "$TMP_EXT/"
 
           if [ -n "${OTMENT_EXT_KEY_BASE64:-}" ]; then
             python3 - <<'PY'
-              import json, os, sys
-              p = "/tmp/otment-extension/manifest.json"
-              b = os.environ.get("OTMENT_EXT_KEY_BASE64")
-              try:
-                  m = json.load(open(p))
-              except Exception as e:
-                  print("ERROR: failed to read manifest.json:", e)
-                  sys.exit(1)
-              if "key" not in m:
-                  m2 = {"manifest_version": m.get("manifest_version", 3), "key": b}
-                  for k, v in m.items():
-                      if k != "manifest_version":
-                          m2[k] = v
-                  open(p, "w").write(json.dumps(m2, indent=2))
-              else:
-                  print("manifest already has key")
-              PY
-                        else
-                          echo "No OTMENT_EXT_KEY_BASE64 provided"
-                        fi
-              
-                        # make sure files are readable by Chrome
-                        sudo chmod -R 755 "$TMP_EXT" || true
-              
-                        echo "EXTENSION_PATH=${TMP_EXT}" >> $GITHUB_ENV
-                        echo "CHROME_ARGS=--disable-extensions-except=${TMP_EXT} --load-extension=${TMP_EXT} --no-sandbox --disable-dev-shm-usage --window-size=1920,1080" >> $GITHUB_ENV
-              
-                    - name: Debug injected extension contents
-                      run: |
-                        echo "EXTENSION_PATH=$EXTENSION_PATH"
-                        echo "CHROME_ARGS=$CHROME_ARGS"
-                        echo "Listing extension files:"
-                        ls -la "$EXTENSION_PATH" || true
-                        echo "--- manifest.json ---"
-                        jq . "$EXTENSION_PATH/manifest.json" || cat "$EXTENSION_PATH/manifest.json" || true
-                        echo "--- key field (single line) ---"
-                        jq -r '.key // "NO_KEY"' "$EXTENSION_PATH/manifest.json" || true
-                        echo "--- check main scripts ---"
-                        for f in background.js background.mjs service_worker.js service-worker.js; do
-                          [ -f "$EXTENSION_PATH/$f" ] && echo "FOUND: $f" && head -n 40 "$EXTENSION_PATH/$f"
-                        done
-                        echo "--- ensure readable ---"
-                        sudo chmod -R 755 "$EXTENSION_PATH" || true
+import json, os, sys
+p = "/tmp/otment-extension/manifest.json"
+b = os.environ.get("OTMENT_EXT_KEY_BASE64")
+try:
+    m = json.load(open(p))
+except Exception as e:
+    print("ERROR: failed to read manifest.json:", e)
+    sys.exit(1)
+if "key" not in m:
+    m2 = {"manifest_version": m.get("manifest_version", 3), "key": b}
+    for k, v in m.items():
+        if k != "manifest_version":
+            m2[k] = v
+    open(p, "w").write(json.dumps(m2, indent=2))
+else:
+    print("manifest already has key")
+PY
+          else
+            echo "No OTMENT_EXT_KEY_BASE64 provided"
+          fi
+
+          sudo chmod -R 755 "$TMP_EXT" || true
+          echo "EXTENSION_PATH=${TMP_EXT}" >> $GITHUB_ENV
+          echo "CHROME_ARGS=--disable-extensions-except=${TMP_EXT} --load-extension=${TMP_EXT} --no-sandbox --disable-dev-shm-usage --window-size=1920,1080" >> $GITHUB_ENV
+
+      - name: Debug injected extension contents
+        run: |
+          echo "EXTENSION_PATH=$EXTENSION_PATH"
+          echo "CHROME_ARGS=$CHROME_ARGS"
+          echo "Listing extension files:"
+          ls -la "$EXTENSION_PATH" || true
+          echo "--- manifest.json ---"
+          jq . "$EXTENSION_PATH/manifest.json" || cat "$EXTENSION_PATH/manifest.json" || true
+          echo "--- key field (single line) ---"
+          jq -r '.key // "NO_KEY"' "$EXTENSION_PATH/manifest.json" || true
+          echo "--- check main scripts ---"
+          for f in background.js background.mjs service_worker.js service-worker.js; do
+            [ -f "$EXTENSION_PATH/$f" ] && echo "FOUND: $f" && head -n 40 "$EXTENSION_PATH/$f"
+          done
+          echo "--- ensure readable ---"
+          sudo chmod -R 755 "$EXTENSION_PATH" || true
 
       - name: Export Chrome args (legacy fallback)
         run: |
@@ -241,4 +238,4 @@ jobs:
           if [ -z "$CHROME_PATH" ]; then
             CHROME_PATH=$(which google-chrome || which chromium || find /opt/hostedtoolcache/setup-chrome -type f -name chrome | head -n1)
           fi
-          echo "Using CHROME_PATH
+          echo "Using CHROME_PATH: $CHROME_PATH"
