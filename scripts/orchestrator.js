@@ -1,47 +1,68 @@
 /**
- * Unified Orchestrator.js (Extension Verification Enhanced)
- * ------------------------------------------------------------
- * ✅ Handles VPN rotation and connection (OpenVPN)
- * ✅ Verifies IP before & after VPN
- * ✅ Launches Chrome with unpacked extension (repo root)
- * ✅ Waits for extension initialization
- * ✅ Logs all detected extensions
- * ✅ Verifies extension status ("active" vs "inactive")
- * ✅ Takes screenshots and logs console output
- * ✅ Cleans up VPN session, writes diagnostics
+ * Unified Orchestrator.js (Full, hardened)
+ * - Robust OpenVPN handling without relying on --daemon + sudo where possible
+ * - Writes logs to artifacts for CI-readable diagnostics
+ * - Waits for "Initialization Sequence Completed" or pid file
+ * - Safer external IP detection with retries
+ * - Proper chromeArgs splitting and diagnostics
+ * - Decodes EXT_KEY (base64) to key.pem inside extension path if provided
+ * - Better extension detection (targets + extensionPath listing)
+ * - Unique user-data-dir per run; cleans up on exit
+ * - Explicit exit codes for CI
  */
 
 import fs from "fs";
 import path from "path";
-import { execSync, spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import puppeteer from "puppeteer-core";
+import crypto from "crypto";
 
+const rootDir = process.cwd();
 const vpnDir = path.resolve("VPN");
 const stateFile = path.join(vpnDir, ".vpn_state.json");
 const authFile = path.join(vpnDir, "auth.txt");
 const artifactsDir = path.resolve("artifacts/diagnostics");
 const screenshotsDir = path.resolve("artifacts/screenshots");
-
+const openvpnLogsDir = path.join(artifactsDir, "openvpn");
 const targetUrl =
-  process.env.TEST_PAGE_URL ||
-  "http://127.0.0.1:8080/otment-test.html"; // safer local page for verification
-const publicIPUrl = "https://ifconfig.co";
-const connectTimeoutSec = 60;
+  process.env.TEST_PAGE_URL || "http://127.0.0.1:8080/otment-test.html";
+const publicIPServices = ["https://ifconfig.co", "https://api.ipify.org"];
+const connectTimeoutSec = parseInt(process.env.VPN_CONNECT_TIMEOUT || "60", 10);
+const chromePath = process.env.CHROME_PATH || "/usr/bin/google-chrome";
+const extensionPath = process.env.EXTENSION_PATH || process.cwd();
 
 fs.mkdirSync(artifactsDir, { recursive: true });
 fs.mkdirSync(screenshotsDir, { recursive: true });
+fs.mkdirSync(openvpnLogsDir, { recursive: true });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function getExternalIP() {
+function safeExec(cmd) {
   try {
-    return execSync(`curl -s ${publicIPUrl}`, { encoding: "utf8" }).trim();
+    return execSync(cmd, { encoding: "utf8" }).trim();
   } catch {
-    return "unknown";
+    return "";
   }
 }
 
+async function fetchExternalIP() {
+  // Try multiple services with small retries
+  for (const svc of publicIPServices) {
+    try {
+      const out = execSync(`curl -s --connect-timeout 5 ${svc}`, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+      if (out && out.length > 0) return out;
+    } catch {
+      // fallback
+    }
+  }
+  return "unknown";
+}
+
 function listVpnConfigs() {
+  if (!fs.existsSync(vpnDir)) return [];
   return fs
     .readdirSync(vpnDir)
     .filter((f) => f.endsWith(".ovpn"))
@@ -49,201 +70,403 @@ function listVpnConfigs() {
 }
 
 function loadRotationState() {
-  if (fs.existsSync(stateFile)) {
-    return JSON.parse(fs.readFileSync(stateFile, "utf8"));
-  }
+  try {
+    if (fs.existsSync(stateFile)) {
+      return JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    }
+  } catch {}
   return { used: [] };
 }
 
 function saveRotationState(state) {
-  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+  try {
+    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), "utf8");
+  } catch (e) {
+    console.error("Failed to save rotation state:", e.message);
+  }
 }
 
-async function connectVPN(configPath) {
-  const logFile = "/tmp/openvpn.log";
-  const pidFile = "/tmp/openvpn.pid";
-
+function writeArtifact(filename, data) {
+  const p = path.join(artifactsDir, filename);
   try {
-    execSync("sudo pkill -f openvpn || true");
-  } catch {}
+    fs.writeFileSync(p, data, "utf8");
+  } catch (e) {
+    console.error("Failed writing artifact", p, e.message);
+  }
+}
 
-  console.log(`🌐 Connecting VPN: ${path.basename(configPath)}`);
-  const baseIP = getExternalIP();
-  console.log(`Current IP: ${baseIP}`);
+// decode and write EXT_KEY to key.pem if provided; return boolean indicating action
+function injectExtensionKeyIfPresent(extPath) {
+  const b64 = process.env.EXT_KEY;
+  if (!b64) return false;
+  try {
+    const keyPem = Buffer.from(b64, "base64").toString("utf8");
+    const keyPath = path.join(extPath, "key.pem");
+    fs.writeFileSync(keyPath, keyPem, { mode: 0o600 });
+    console.log("WROTE extension key.pem to", keyPath);
+    writeArtifact("extension-key-wrote.txt", keyPath);
+    return true;
+  } catch (err) {
+    console.error("Failed to decode/write EXT_KEY:", err.message);
+    writeArtifact("extension-key-error.txt", err.message);
+    return false;
+  }
+}
 
-  spawn("sudo", [
-    "openvpn",
+function listExtensionPathContents(extPath) {
+  try {
+    const listing = safeExec(`ls -la ${extPath}`);
+    writeArtifact("extension-path-listing.txt", listing);
+    return listing;
+  } catch {
+    return "";
+  }
+}
+
+async function startOpenvpn(configPath) {
+  // Log files per-config run
+  const cfgBase = path.basename(configPath).replace(/\W+/g, "_");
+  const logFile = path.join(openvpnLogsDir, `${cfgBase}.log`);
+  const pidFile = path.join(openvpnLogsDir, `${cfgBase}.pid`);
+
+  // Check auth file
+  if (!fs.existsSync(authFile)) {
+    throw new Error(`auth.txt missing at ${authFile}`);
+  }
+
+  // Prefer non-sudo spawn if runner has permissions; fallback to sudo
+  const trySudo = process.env.FORCE_SUDO === "1";
+  const argvBase = [
     "--config",
     configPath,
     "--auth-user-pass",
     authFile,
-    "--daemon",
     "--writepid",
     pidFile,
     "--log",
     logFile,
-  ]);
+  ];
 
+  // Ensure a fresh log file exists and is writable by current user
+  try {
+    fs.writeFileSync(logFile, `OpenVPN log initialized ${new Date().toISOString()}\n`, { flag: "a" });
+    fs.chmodSync(logFile, 0o660);
+  } catch (e) {
+    // best-effort
+  }
+
+  console.log("Starting openvpn with log:", logFile);
+  writeArtifact("openvpn-cmd.txt", `${trySudo ? "sudo " : ""}openvpn ${argvBase.join(" ")}`);
+
+  // Spawn openvpn and capture streams
+  let child;
+  try {
+    if (!trySudo) {
+      child = spawn("openvpn", argvBase, { stdio: ["ignore", "pipe", "pipe"] });
+    } else {
+      child = spawn("sudo", ["openvpn", ...argvBase], { stdio: ["ignore", "pipe", "pipe"] });
+    }
+  } catch (err) {
+    throw new Error("Failed to spawn openvpn: " + err.message);
+  }
+
+  // Pipe child output into log file
+  const logStream = fs.createWriteStream(logFile, { flags: "a" });
+  if (child.stdout) child.stdout.pipe(logStream);
+  if (child.stderr) child.stderr.pipe(logStream);
+
+  child.on("error", (e) => {
+    logStream.write(`[OPENVPN SPAWN ERROR] ${e.message}\n`);
+  });
+
+  // Wait for readiness: either pid file exists or log contains marker
   let connected = false;
   for (let i = 0; i < connectTimeoutSec; i++) {
     await sleep(1000);
     try {
-      const ifaces = execSync("ip a", { encoding: "utf8" });
-      if (ifaces.includes("tun0")) {
+      if (fs.existsSync(pidFile)) {
+        const pid = fs.readFileSync(pidFile, "utf8").trim();
+        if (pid && /^\d+$/.test(pid)) {
+          connected = true;
+          break;
+        }
+      }
+      // Read tail of log for "Initialization Sequence Completed"
+      const tail = fs.existsSync(logFile)
+        ? fs.readFileSync(logFile, "utf8").slice(-8192)
+        : "";
+      if (tail.includes("Initialization Sequence Completed")) {
         connected = true;
         break;
       }
-    } catch {}
+    } catch (e) {
+      // ignore transient read errors
+    }
   }
 
   if (!connected) {
-    console.log("❌ VPN failed to connect within timeout.");
+    // dump last lines for artifact then kill child
     try {
-      console.log(fs.readFileSync(logFile, "utf8"));
+      const last = fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").slice(-8192) : "";
+      writeArtifact(`openvpn-${cfgBase}-failure.log`, last || "no-log");
     } catch {}
-    throw new Error("VPN connection timeout");
+    try {
+      child.kill("SIGTERM");
+    } catch {}
+    throw new Error("VPN connection timeout or failed to initialize");
   }
 
-  const vpnIP = getExternalIP();
-  console.log(`VPN external IP: ${vpnIP}`);
-  if (vpnIP === baseIP || vpnIP === "unknown") {
-    throw new Error("VPN did not change external IP.");
+  // Verify an interface exists (tun/tap)
+  let ifaces = "";
+  try {
+    ifaces = safeExec("ip a");
+    writeArtifact(`${cfgBase}-ip-a.txt`, ifaces);
+  } catch {}
+  if (!/tun|tap/.test(ifaces)) {
+    // still allow if "Initialization Sequence Completed" present; we've already checked
+    console.warn("No tun/tap interface detected in ip a; continuing because init marker found");
   }
 
-  console.log("✅ VPN active and IP changed.");
-  return { vpnIP, baseIP };
+  // Return runtime info
+  return { logFile, pidFile, child };
 }
 
-async function disconnectVPN() {
+async function stopOpenvpnByPidFile(pidFile) {
   try {
-    execSync("sudo pkill -f openvpn || true");
+    if (fs.existsSync(pidFile)) {
+      const pid = fs.readFileSync(pidFile, "utf8").trim();
+      if (pid && /^\d+$/.test(pid)) {
+        try {
+          process.kill(parseInt(pid, 10), "SIGTERM");
+        } catch {}
+      }
+      try { fs.unlinkSync(pidFile); } catch {}
+    }
   } catch {}
-  console.log("🔌 VPN disconnected.");
+}
+
+async function disconnectVPNAll() {
+  // best-effort cleanup for any openvpn we started
+  try {
+    // kill processes named openvpn (best-effort)
+    execSync("pkill -f openvpn || true");
+  } catch {}
+  console.log("VPN cleanup attempted.");
+  writeArtifact("vpn-cleanup.txt", `cleanup at ${new Date().toISOString()}`);
 }
 
 // === Browser automation ===
-async function runBrowserAutomation(vpnName) {
-  console.log(`🧠 Launching Chrome automation for ${vpnName}...`);
+function parseChromeArgs() {
+  const raw = process.env.CHROME_ARGS || "";
+  const args = raw && raw.trim() ? raw.trim().split(/\s+/) : [];
+  return args;
+}
 
-  const chromePath = process.env.CHROME_PATH || "/usr/bin/google-chrome";
-  const chromeArgs = (process.env.CHROME_ARGS || "").split(" ");
-  const extensionPath = process.env.EXTENSION_PATH || process.cwd();
+function uniqueChromeProfileDir() {
+  const stamp = Date.now().toString(36) + "-" + crypto.randomBytes(3).toString("hex");
+  return path.join("/tmp", `chrome-profile-${stamp}`);
+}
 
-  const browser = await puppeteer.launch({
-    headless: false,
-    executablePath: chromePath,
-    args: [
-      ...chromeArgs,
-      "--enable-automation",
-      "--allow-insecure-localhost",
-      "--ignore-certificate-errors",
-      "--user-data-dir=/tmp/chrome-profile",
-      `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`,
-    ],
-    ignoreDefaultArgs: ["--disable-extensions", "--headless"],
-  });
+async function runBrowserAutomation(vpnName, runMeta = {}) {
+  console.log(`Launching Chrome automation for ${vpnName}...`);
+  const chromeArgs = parseChromeArgs();
+  const userDataDir = uniqueChromeProfileDir();
+  const absoluteExtPath = path.resolve(extensionPath);
 
-  console.log("✅ Chrome started successfully.");
+  // Inject key if provided
+  injectExtensionKeyIfPresent(absoluteExtPath);
+  listExtensionPathContents(absoluteExtPath);
 
-  // Wait for extension to fully initialize
-  console.log("⏳ Waiting 8s for extension initialization...");
-  await sleep(8000);
+  // Build args ensuring no empty strings
+  const args = [
+    ...chromeArgs,
+    "--enable-automation",
+    "--allow-insecure-localhost",
+    "--ignore-certificate-errors",
+    `--user-data-dir=${userDataDir}`,
+    `--disable-extensions-except=${absoluteExtPath}`,
+    `--load-extension=${absoluteExtPath}`,
+  ].filter(Boolean);
 
-  // Detect all extension contexts
-  const extensions = (await browser.targets())
-    .filter((t) => t.url().startsWith("chrome-extension://"))
-    .map((t) => t.url());
+  writeArtifact("chrome-args.txt", `${chromePath} ${args.join(" ")}`);
+  console.log("CHROME ARGS:", `${chromePath} ${args.join(" ")}`);
 
-  const extLog = path.join(artifactsDir, "extensions.log");
-  fs.writeFileSync(
-    extLog,
-    extensions.length ? extensions.join("\n") : "No extensions detected.",
-    "utf8"
-  );
-  console.log(`🔍 Detected extensions: ${extensions.length}`);
-  extensions.forEach((e) => console.log(" →", e));
+  let browser;
+  try {
+    browser = await puppeteer.launch({
+      headless: false,
+      executablePath: chromePath,
+      args,
+      ignoreDefaultArgs: ["--disable-extensions", "--headless"],
+    });
+  } catch (err) {
+    writeArtifact("puppeteer-launch-error.txt", err.message);
+    throw new Error("Failed to launch Chrome: " + err.message);
+  }
 
-  // Open a new page for verification
+  console.log("Chrome started");
+  // Wait a short while for extension to register
+  await sleep(4000);
+
+  // Collect extension-related targets over a short window
+  const discovered = new Set();
+  for (let i = 0; i < 6; i++) {
+    const targets = browser.targets();
+    for (const t of targets) {
+      try {
+        const u = t.url();
+        if (u && u.startsWith("chrome-extension://")) {
+          discovered.add(u);
+        }
+      } catch {}
+    }
+    if (discovered.size) break;
+    await sleep(1000);
+  }
+  const extensions = Array.from(discovered);
+  writeArtifact("extensions.log", extensions.length ? extensions.join("\n") : "No extensions detected.");
+
+  // If no extension pages found, attempt to report computed deterministic ID if key present
+  // (simple heuristic: list manifest.json and key.pem existence)
+  try {
+    const hasKey = fs.existsSync(path.join(absoluteExtPath, "key.pem"));
+    const hasManifest = fs.existsSync(path.join(absoluteExtPath, "manifest.json"));
+    writeArtifact("extension-inspection.txt", `hasKey:${hasKey};hasManifest:${hasManifest}`);
+  } catch {}
+
+  // Puppeteer page for verification
   const page = await browser.newPage();
-  const logFile = path.join(artifactsDir, "puppeteer.log");
-  const logStream = fs.createWriteStream(logFile, { flags: "a" });
+  const puppeteerLog = path.join(artifactsDir, "puppeteer.log");
+  const logStream = fs.createWriteStream(puppeteerLog, { flags: "a" });
   page.on("console", (msg) => {
-    logStream.write(`[${new Date().toISOString()}] ${msg.text()}\n`);
+    try {
+      logStream.write(`[${new Date().toISOString()}] ${msg.text()}\n`);
+    } catch {}
   });
 
   page.setDefaultTimeout(60000);
-
+  let statusText = "no-status-element";
   try {
-    console.log(`🌍 Navigating to ${targetUrl}`);
+    console.log("Navigating to", targetUrl);
     await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-
-    // Wait for page load
-    await sleep(5000);
-
-    // Check for extension-injected content
-    const statusText = await page.evaluate(() => {
+    await sleep(3000);
+    // Query possible hooks: #otment-status, window.__OTMENT_STATUS, data-otment attributes
+    statusText = await page.evaluate(() => {
       const el = document.querySelector("#otment-status");
-      return el ? el.textContent.trim() : "no-status-element";
+      if (el) return el.textContent.trim();
+      if (window && window.__OTMENT_STATUS) return String(window.__OTMENT_STATUS);
+      const attr = document.querySelector("[data-otment-status]");
+      if (attr) return attr.getAttribute("data-otment-status");
+      return "no-status-element";
     });
-
-    console.log("📊 Extension status element text:", statusText);
-    fs.writeFileSync(
-      path.join(artifactsDir, "extension-status.json"),
-      JSON.stringify({ status: statusText, url: targetUrl }, null, 2),
-      "utf8"
-    );
-
-    // Take screenshot
-    const shot = path.join(screenshotsDir, `${path.basename(vpnName)}.png`);
+    writeArtifact("extension-status.json", JSON.stringify({ status: statusText, url: targetUrl }, null, 2));
+    const shot = path.join(screenshotsDir, `${vpnName.replace(/\W+/g, "_")}.png`);
     await page.screenshot({ path: shot, fullPage: true });
-    console.log(`📸 Screenshot saved: ${shot}`);
+    console.log("Screenshot saved:", shot);
 
-    if (statusText.toLowerCase().includes("active")) {
-      console.log("✅ Extension appears ACTIVE and running.");
+    if (/active/i.test(statusText)) {
+      console.log("Extension appears ACTIVE");
+      writeArtifact("extension-verified.txt", `active:${statusText}`);
     } else {
-      console.warn("⚠️ Extension inactive or not injected properly.");
+      console.warn("Extension not reporting active status:", statusText);
+      writeArtifact("extension-verified.txt", `inactive:${statusText}`);
     }
   } catch (err) {
-    console.error("❌ Browser automation failed:", err.message);
+    console.error("Browser automation step failed:", err.message);
     logStream.write(`[ERROR] ${err.stack}\n`);
+    writeArtifact("puppeteer-error.txt", err.message);
   } finally {
-    await browser.close();
-    logStream.end();
-    console.log("🧹 Browser session closed.");
+    try {
+      await browser.close();
+    } catch {}
+    try { logStream.end(); } catch {}
+    // Cleanup user-data-dir
+    try {
+      execSync(`rm -rf ${userDataDir} || true`);
+    } catch {}
   }
+
+  return { statusText, extensions };
 }
 
 // === MAIN ===
 (async () => {
-  const allConfigs = listVpnConfigs();
-  if (!allConfigs.length) {
-    console.error("No VPN configs found in /VPN/");
-    process.exit(1);
-  }
-
-  const state = loadRotationState();
-  const remaining = allConfigs.filter(
-    (cfg) => !state.used.includes(path.basename(cfg))
-  );
-  const nextConfig = remaining.length ? remaining[0] : allConfigs[0];
-  const vpnName = path.basename(nextConfig).replace(/\.ovpn$/, "");
-
-  console.log(`🔁 Selected VPN: ${vpnName}`);
-  if (!remaining.length) {
-    console.log("🔄 Resetting rotation — all configs used.");
-    state.used = [];
-  }
-
   try {
-    await connectVPN(nextConfig);
-    await runBrowserAutomation(vpnName);
+    const allConfigs = listVpnConfigs();
+    if (!allConfigs.length) {
+      console.error("No VPN configs found in /VPN/");
+      process.exit(10);
+    }
+
+    const state = loadRotationState();
+    const remaining = allConfigs.filter((cfg) => !state.used.includes(path.basename(cfg)));
+    const nextConfig = remaining.length ? remaining[0] : allConfigs[0];
+    const vpnName = path.basename(nextConfig).replace(/\.ovpn$/, "");
+
+    console.log("Selected VPN:", vpnName);
+    if (!remaining.length) state.used = [];
+
+    // Capture pre-VPN IP
+    const preIP = await fetchExternalIP();
+    writeArtifact("pre-vpn-ip.txt", preIP);
+    console.log("Pre-VPN IP:", preIP);
+
+    // Start VPN
+    let runtimeInfo;
+    try {
+      runtimeInfo = await startOpenvpn(nextConfig);
+    } catch (err) {
+      console.error("VPN start failed:", err.message);
+      writeArtifact("vpn-start-error.txt", err.message);
+      await disconnectVPNAll();
+      process.exit(20);
+    }
+
+    // Confirm external IP changed
+    const postIP = await fetchExternalIP();
+    writeArtifact("post-vpn-ip.txt", postIP);
+    console.log("Post-VPN IP:", postIP);
+    if (!postIP || postIP === "unknown" || postIP === preIP) {
+      console.error("VPN did not change external IP or IP unknown");
+      // Dump VPN log to artifacts for debugging
+      try {
+        const tail = fs.existsSync(runtimeInfo.logFile) ? fs.readFileSync(runtimeInfo.logFile, "utf8").slice(-8192) : "";
+        writeArtifact("openvpn-tail-on-failure.log", tail);
+      } catch {}
+      await disconnectVPNAll();
+      process.exit(21);
+    }
+
+    // Run browser automation
+    try {
+      const { statusText, extensions } = await runBrowserAutomation(vpnName, { preIP, postIP });
+      // If extension not active, return nonzero but continue cleanup
+      if (!/active/i.test(statusText)) {
+        console.warn("Extension verification failed or inactive");
+        state.used.push(path.basename(nextConfig));
+        saveRotationState(state);
+        await stopOpenvpnByPidFile(runtimeInfo.pidFile);
+        await disconnectVPNAll();
+        process.exit(30);
+      }
+      // success path
+      state.used.push(path.basename(nextConfig));
+      saveRotationState(state);
+      await stopOpenvpnByPidFile(runtimeInfo.pidFile);
+      await disconnectVPNAll();
+      console.log("SUCCESS: Extension appears active and VPN verified.");
+      process.exit(0);
+    } catch (err) {
+      console.error("Browser automation error:", err.message);
+      writeArtifact("automation-failure.txt", err.message);
+      await stopOpenvpnByPidFile(runtimeInfo.pidFile);
+      await disconnectVPNAll();
+      process.exit(31);
+    }
   } catch (err) {
-    console.error("❌ Error:", err.message);
-  } finally {
-    await disconnectVPN();
-    state.used.push(path.basename(nextConfig));
-    saveRotationState(state);
-    console.log("✅ Rotation state updated.");
+    console.error("Fatal error:", err.message);
+    writeArtifact("fatal-error.txt", err.stack || err.message);
+    try { await disconnectVPNAll(); } catch {}
+    process.exit(99);
   }
 })();
