@@ -142,17 +142,27 @@ jobs:
       # ===========================
       # 3. Chrome + Extension Setup
       # ===========================
-      - name: ⚙️ Inject unpacked extension and set Chrome args
+      - name: ⚙️ Detect and inject unpacked Chrome extension
         run: |
           set -euo pipefail
           TMP_EXT="/tmp/otment-extension"
           rm -rf "$TMP_EXT"
           mkdir -p "$TMP_EXT"
-          cp -r "${GITHUB_WORKSPACE}/." "$TMP_EXT/"
+
+          # 🔍 Detect actual extension folder (where manifest.json lives)
+          EXT_SRC=$(find "${GITHUB_WORKSPACE}" -maxdepth 3 -name "manifest.json" -printf '%h\n' | head -n1)
+          if [ -z "$EXT_SRC" ]; then
+            echo "❌ manifest.json not found in repository — cannot load extension"
+            exit 1
+          fi
+
+          echo "📦 Copying Chrome extension from: $EXT_SRC"
+          cp -r "$EXT_SRC/." "$TMP_EXT/"
           sudo chmod -R 755 "$TMP_EXT" || true
+
           echo "EXTENSION_PATH=$TMP_EXT" >> $GITHUB_ENV
           echo "CHROME_ARGS=--no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080 --disable-extensions-except=$TMP_EXT --load-extension=$TMP_EXT" >> $GITHUB_ENV
-          echo "✅ Extension prepared."
+          echo "✅ Extension ready at: $TMP_EXT"
 
       # ===========================
       # 4. Puppeteer Orchestration
