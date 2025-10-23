@@ -1,13 +1,13 @@
 /**
- * Orchestrator.js — Enhanced Puppeteer + VPN automation
- * -----------------------------------------------------------
- * ✅ Rotates VPN configs safely
- * ✅ Connects via OpenVPN & verifies new IP
- * ✅ Launches Chrome with unpacked extension (root dir)
- * ✅ Logs all loaded Chrome extensions (extensions.log)
- * ✅ Automates FastPeopleSearch test URL
- * ✅ Captures screenshot + saves diagnostics
- * ✅ Cleans up VPN and updates rotation
+ * Unified Orchestrator.js
+ * ------------------------------------------------------------
+ * ✅ Handles VPN rotation and connection (OpenVPN)
+ * ✅ Verifies IP before & after VPN
+ * ✅ Launches Chrome with unpacked extension (repo root)
+ * ✅ Logs all detected extensions
+ * ✅ Opens target URL (FastPeopleSearch or local test page)
+ * ✅ Takes screenshots and logs console output
+ * ✅ Cleans up VPN session, writes diagnostics
  */
 
 import fs from "fs";
@@ -20,15 +20,13 @@ const stateFile = path.join(vpnDir, ".vpn_state.json");
 const authFile = path.join(vpnDir, "auth.txt");
 const artifactsDir = path.resolve("artifacts/diagnostics");
 const screenshotsDir = path.resolve("artifacts/screenshots");
-
-// from env or fallback
-const testPage =
+const targetUrl =
   process.env.TEST_PAGE_URL ||
   "https://www.fastpeoplesearch.com/address/123-main-st_98001";
 const publicIPUrl = "https://ifconfig.co";
 const connectTimeoutSec = 60;
 
-// ensure directories exist
+// Ensure dirs exist
 fs.mkdirSync(artifactsDir, { recursive: true });
 fs.mkdirSync(screenshotsDir, { recursive: true });
 
@@ -85,7 +83,7 @@ async function connectVPN(configPath) {
     logFile,
   ]);
 
-  // wait for tun0 to appear
+  // wait for tun0
   let connected = false;
   for (let i = 0; i < connectTimeoutSec; i++) {
     await sleep(1000);
@@ -123,7 +121,7 @@ async function disconnectVPN() {
   console.log("🔌 VPN disconnected.");
 }
 
-// === Browser Automation ===
+// === Browser automation ===
 async function runBrowserAutomation(vpnName) {
   console.log(`🧠 Launching Chrome automation for ${vpnName}...`);
 
@@ -138,7 +136,6 @@ async function runBrowserAutomation(vpnName) {
       "--enable-automation",
       "--allow-insecure-localhost",
       "--ignore-certificate-errors",
-      "--enable-extensions",
       "--user-data-dir=/tmp/chrome-profile",
     ],
     ignoreDefaultArgs: ["--disable-extensions", "--headless"],
@@ -146,48 +143,50 @@ async function runBrowserAutomation(vpnName) {
 
   console.log("✅ Chrome started successfully.");
 
-  // detect & log extensions
-  try {
-    const extensions = (await browser.targets())
-      .filter((t) => t.url().startsWith("chrome-extension://"))
-      .map((t) => t.url());
+  // Log all detected extensions
+  const extensions = (await browser.targets())
+    .filter((t) => t.url().startsWith("chrome-extension://"))
+    .map((t) => t.url());
+  const extLog = path.join(artifactsDir, "extensions.log");
+  fs.writeFileSync(extLog, extensions.join("\n"), "utf8");
+  console.log(`🔍 Detected extensions: ${extensions.length}`);
+  extensions.forEach((e) => console.log(" →", e));
 
-    const extLog = path.join(artifactsDir, "extensions.log");
-    fs.writeFileSync(extLog, extensions.join("\n"), "utf8");
-
-    if (extensions.length > 0) {
-      console.log(`🔍 Detected ${extensions.length} extension(s):`);
-      extensions.forEach((u) => console.log("  •", u));
-    } else {
-      console.warn("⚠️ No extensions detected — check --load-extension path.");
-    }
-  } catch (e) {
-    console.error("❌ Failed to list extensions:", e.message);
-  }
-
+  // Capture console logs
   const page = await browser.newPage();
-  page.setDefaultTimeout(30000);
+  const logFile = path.join(artifactsDir, "puppeteer.log");
+  const logStream = fs.createWriteStream(logFile, { flags: "a" });
+  page.on("console", (msg) => {
+    logStream.write(`[${new Date().toISOString()}] ${msg.text()}\n`);
+  });
+
+  page.setDefaultTimeout(45000);
 
   try {
-    console.log(`🌍 Navigating to ${testPage}`);
-    await page.goto(testPage, { waitUntil: "networkidle2" });
+    console.log(`🌍 Navigating to ${targetUrl}`);
+    await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 45000 });
 
-    const shotPath = path.join(
+    // Optional: wait for page load indicator or captcha bypass
+    await sleep(5000);
+
+    // Screenshot
+    const shot = path.join(
       screenshotsDir,
-      `fastpeoplesearch-${vpnName}.png`
+      `${path.basename(vpnName)}.png`
     );
-    await sleep(3000);
-    await page.screenshot({ path: shotPath, fullPage: true });
-    console.log(`📸 Screenshot saved: ${shotPath}`);
+    await page.screenshot({ path: shot, fullPage: true });
+    console.log(`📸 Screenshot saved: ${shot}`);
   } catch (err) {
     console.error("❌ Browser automation failed:", err.message);
+    logStream.write(`[ERROR] ${err.stack}\n`);
   } finally {
     await browser.close();
+    logStream.end();
     console.log("🧹 Browser session closed.");
   }
 }
 
-// === Main ===
+// === MAIN ===
 (async () => {
   const allConfigs = listVpnConfigs();
   if (!allConfigs.length) {
