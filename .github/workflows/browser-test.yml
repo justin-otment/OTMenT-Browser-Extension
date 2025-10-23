@@ -11,7 +11,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🧩 Checkout
+      # ===========================
+      # 1. Setup and Preparation
+      # ===========================
+      - name: 🧩 Checkout repository
         uses: actions/checkout@v4
 
       - name: 🧱 Setup Node.js
@@ -37,7 +40,7 @@ jobs:
           install-dependencies: true
           install-chromedriver: false
 
-      - name: 💾 Cache npm
+      - name: 💾 Cache npm dependencies
         uses: actions/cache@v4
         with:
           path: ~/.npm
@@ -72,34 +75,18 @@ jobs:
           echo "CHROME_BIN=$CHROME_BIN" >> $GITHUB_ENV
           "$CHROME_BIN" --version
 
-      - name: 🧪 Ensure chromedriver present (diagnostic)
+      - name: 🧪 Ensure chromedriver presence (diagnostic)
         run: |
           ls -la node_modules/.bin || true
           node -e "console.log(require('chromedriver')?.path || 'chromedriver not found')" || true
 
-      - name: 🗂️ Prepare artifacts directories
+      - name: 🗂️ Prepare artifact directories
         run: mkdir -p artifacts/{screenshots,diagnostics,videos}
 
-      - name: 🧾 Ensure test page exists
-        run: |
-          if [ ! -f "otment-test.html" ]; then
-            echo "⚠️ otment-test.html missing, creating fallback..."
-            cat <<'EOF' > otment-test.html
-          <!DOCTYPE html>
-          <html lang="en">
-          <head><meta charset="UTF-8"><title>OTMenT Test Page</title></head>
-          <body>
-            <h3>OTMenT Puppeteer Test Page</h3>
-            <iframe id="test-frame" srcdoc="<input id='target-input' placeholder='Type here...' />" width="600" height="400"></iframe>
-          </body>
-          </html>
-          EOF
-          fi
-          echo "✅ otment-test.html ready."
-
+      # ===========================
+      # 2. VPN Connection
+      # ===========================
       - name: 🔁 Rotate and connect OpenVPN
-        env:
-          CI: true
         run: |
           set -euo pipefail
           VPN_DIR="VPN"
@@ -152,21 +139,10 @@ jobs:
             echo "❌ VPN connection failed"; tail -n 100 "$LOGFILE"; exit 1;
           }
 
-      - name: 🌍 Start local static server
-        run: |
-          npm install -g http-server@14
-          nohup npx http-server -p 8080 -c-1 . > /tmp/http-server.log 2>&1 &
-          for i in $(seq 1 10); do
-            curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null 2>&1 && break
-            sleep 1
-          done
-          curl -sSf http://127.0.0.1:8080/otment-test.html >/dev/null || {
-            echo "❌ Test page not reachable"; cat /tmp/http-server.log; exit 1;
-          }
-
-      - name: ⚙️ Inject extension and Chrome args
-        env:
-          OTMENT_EXT_KEY_BASE64: ${{ secrets.OTMENT_EXT_KEY_BASE64 }}
+      # ===========================
+      # 3. Chrome + Extension Setup
+      # ===========================
+      - name: ⚙️ Inject unpacked extension and set Chrome args
         run: |
           set -euo pipefail
           TMP_EXT="/tmp/otment-extension"
@@ -178,19 +154,25 @@ jobs:
           echo "CHROME_ARGS=--no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080 --disable-extensions-except=$TMP_EXT --load-extension=$TMP_EXT" >> $GITHUB_ENV
           echo "✅ Extension prepared."
 
+      # ===========================
+      # 4. Puppeteer Orchestration
+      # ===========================
       - name: 🚀 Run Puppeteer orchestrator
         env:
           CI: true
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
           CHROME_PATH: ${{ env.CHROME_BIN }}
-          TEST_PAGE_URL: "http://127.0.0.1:8080/otment-test.html"
+          TEST_PAGE_URL: "https://www.fastpeoplesearch.com/address/123-main-st_98001"
           DEBUG: puppeteer:*
         run: |
-          echo "🚀 Launching Puppeteer (explicit Chrome path)..."
+          echo "🚀 Launching Puppeteer orchestrator..."
           export PUPPETEER_EXECUTABLE_PATH="${CHROME_PATH}"
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" node scripts/orchestrator.js
         timeout-minutes: 35
 
+      # ===========================
+      # 5. Post-Run Cleanup
+      # ===========================
       - name: 🧾 Collect diagnostics and screenshots
         if: always()
         run: |
@@ -203,7 +185,7 @@ jobs:
           sudo pkill -f openvpn || true
           echo "✅ VPN disconnected."
 
-      - name: 📤 Upload artifacts
+      - name: 📤 Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
