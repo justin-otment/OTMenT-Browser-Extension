@@ -1,146 +1,206 @@
-name: 🧩 OTMenT Extension Runner (via Puppeteer + VPN)
+name: Browser tests (non-headless)
 
-on:
-  workflow_dispatch:
-  push:
-    branches: [ main ]
-  pull_request:
+on: [push, pull_request]
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   browser:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
 
     steps:
-      # =========================================
-      # 1. 🧩 Setup Environment
-      # =========================================
-      - name: Checkout repository
+      # ===========================
+      # 1. Setup and Preparation
+      # ===========================
+      - name: 🧩 Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: 🧱 Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Linux dependencies
+      - name: 🧰 Install system dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y \
-            xvfb libgtk-3-0 libxss1 libasound2t64 \
-            libgbm-dev libnss3-dev libu2f-udev xdg-utils \
-            openvpn curl jq iproute2
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository -y universe
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            xvfb libgtk-3-0 libxss1 libasound2t64 fonts-liberation \
+            libgbm-dev libnss3-dev libu2f-udev xdg-utils openvpn \
+            iproute2 iputils-ping curl python3 python3-pip jq
 
-      - name: Setup Chrome
+      - name: 🌐 Setup Chrome (Chromium)
         uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: latest
           install-dependencies: true
+          install-chromedriver: false
 
-      - name: Cache npm dependencies
+      - name: 💾 Cache npm dependencies
         uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          key: npm-cache-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            npm-cache-${{ runner.os }}-
 
-      - name: Install Node dependencies
+      - name: 📦 Install npm packages (robust)
         env:
           CI: true
         run: |
-          echo "📦 Installing Node dependencies..."
-          npm ci --ignore-scripts || npm install --legacy-peer-deps
-          echo "📦 Installing Puppeteer (required in CI)..."
-          npm install puppeteer
+          set -euo pipefail
+          echo "Attempting npm ci (deterministic)..."
+          if npm ci --ignore-scripts --no-audit --no-fund; then
+            echo "✅ npm ci succeeded"
+          else
+            echo "⚠ npm ci failed — falling back to npm install --legacy-peer-deps"
+            npm install --legacy-peer-deps --no-audit --no-fund
+          fi
 
-      - name: 🔐 Decode service account key
-        run: |
-          echo "${{ secrets.GSHEETS_SERVICE_KEY_B64 }}" | base64 --decode > service-account.json
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/service-account.json" >> $GITHUB_ENV
-
-      - name: Detect Chrome binary
-        id: chrome
+      - name: 🕵️ Locate Chrome binary
+        id: chrome-bin
         run: |
           CHROME_BIN=$(which google-chrome || which chromium || true)
           if [ -z "$CHROME_BIN" ]; then
-            echo "❌ Chrome binary not found"; exit 1;
+            CHROME_BIN=$(find /opt/hostedtoolcache/setup-chrome -type f -name chrome | head -n1)
           fi
+          if [ -z "$CHROME_BIN" ]; then
+            echo "❌ Chrome binary not found."; exit 1
+          fi
+          echo "✅ Using Chrome binary: $CHROME_BIN"
           echo "CHROME_BIN=$CHROME_BIN" >> $GITHUB_ENV
           "$CHROME_BIN" --version
 
-      # =========================================
-      # 2. 🌐 Setup VPN Connection
-      # =========================================
-      - name: Connect OpenVPN
+      - name: 🧪 Ensure chromedriver presence (diagnostic)
         run: |
+          ls -la node_modules/.bin || true
+          node -e "console.log(require('chromedriver')?.path || 'chromedriver not found')" || true
+
+      - name: 🗂️ Prepare artifact directories
+        run: mkdir -p artifacts/{screenshots,diagnostics,videos}
+
+      # ===========================
+      # 2. VPN Connection
+      # ===========================
+      - name: 🔁 Rotate and connect OpenVPN
+        run: |
+          set -euo pipefail
           VPN_DIR="VPN"
           AUTH_FILE="$VPN_DIR/auth.txt"
-          OVPN=$(find "$VPN_DIR" -name "*.ovpn" | head -n1)
-          if [ -z "$OVPN" ]; then
-            echo "❌ No .ovpn config found."; exit 1;
-          fi
-          echo "🌍 Using VPN config: $OVPN"
-          sudo nohup openvpn --config "$OVPN" \
-            --auth-user-pass "$AUTH_FILE" \
-            --daemon --writepid /tmp/openvpn.pid \
-            --log /tmp/openvpn.log
-          echo "🕐 Waiting for VPN to establish..."
-          sleep 10
-          echo "🌎 External IP (via VPN):"
-          curl -s https://ifconfig.me || true
+          STATE_FILE="$VPN_DIR/rotation_state.txt"
+          PIDFILE="/tmp/openvpn.pid"
+          LOGFILE="/tmp/openvpn.log"
 
-      # =========================================
-      # 3. 🧱 Prepare Extension
-      # =========================================
-      - name: Package Chrome Extension
+          mapfile -t OVPN_LIST < <(find "$VPN_DIR" -maxdepth 1 -type f -name "*.ovpn" | sort)
+          if [ ${#OVPN_LIST[@]} -eq 0 ]; then
+            echo "❌ No .ovpn found in $VPN_DIR"; exit 1
+          fi
+          [ -f "$AUTH_FILE" ] || { echo "❌ Missing $AUTH_FILE"; exit 1; }
+
+          if [ -f "$STATE_FILE" ]; then
+            LAST=$(cat "$STATE_FILE" || true)
+            IDX=$(printf '%s\n' "${OVPN_LIST[@]}" | grep -nFx "$LAST" | cut -d: -f1 || echo 0)
+            NEXT_INDEX=$(( (IDX) % ${#OVPN_LIST[@]} ))
+            NEXT="${OVPN_LIST[$NEXT_INDEX]}"
+          else
+            NEXT="${OVPN_LIST[0]}"
+          fi
+
+          echo "$NEXT" > "$STATE_FILE"
+          echo "🧭 Using VPN config: $NEXT"
+
+          BASE_IP=$(curl -sS https://ifconfig.co || echo "unknown")
+          echo "🌐 Base IP: $BASE_IP"
+
+          echo "🚀 Starting OpenVPN..."
+          if grep -q "auth-user-pass" "$NEXT"; then
+            sudo nohup openvpn --config "$NEXT" --auth-user-pass "$AUTH_FILE" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
+          else
+            sudo nohup openvpn --config "$NEXT" --daemon --writepid "$PIDFILE" --log "$LOGFILE"
+          fi
+
+          sleep 5
+          [ -f "$PIDFILE" ] || { echo "❌ OpenVPN failed to start"; tail -n 50 "$LOGFILE"; exit 1; }
+
+          echo "⏳ Waiting for tun0..."
+          for i in $(seq 1 60); do
+            ip a show tun0 &>/dev/null && break
+            sleep 1
+          done
+          ip a show tun0 &>/dev/null || { echo "❌ VPN interface not found"; tail -n 100 "$LOGFILE"; exit 1; }
+
+          VPN_IP=$(curl -sS https://ifconfig.co || echo "unknown")
+          echo "VPN IP: $VPN_IP"
+          [ "$VPN_IP" != "$BASE_IP" ] && [ "$VPN_IP" != "unknown" ] || {
+            echo "❌ VPN connection failed"; tail -n 100 "$LOGFILE"; exit 1;
+          }
+
+      # ===========================
+      # 3. Chrome + Extension Setup
+      # ===========================
+      - name: ⚙️ Detect and inject unpacked Chrome extension
         run: |
-          EXT_SRC=$(find . -maxdepth 3 -name "manifest.json" -printf '%h\n' | head -n1)
+          set -euo pipefail
+          TMP_EXT="/tmp/otment-extension"
+          rm -rf "$TMP_EXT"
+          mkdir -p "$TMP_EXT"
+
+          # 🔍 Detect actual extension folder (where manifest.json lives)
+          EXT_SRC=$(find "${GITHUB_WORKSPACE}" -maxdepth 3 -name "manifest.json" -printf '%h\n' | head -n1)
           if [ -z "$EXT_SRC" ]; then
-            echo "❌ Could not find manifest.json"; exit 1;
+            echo "❌ manifest.json not found in repository — cannot load extension"
+            exit 1
           fi
-          EXT_PATH="/tmp/otment-extension"
-          mkdir -p "$EXT_PATH"
-          cp -r "$EXT_SRC/." "$EXT_PATH/"
-          echo "EXTENSION_PATH=$EXT_PATH" >> $GITHUB_ENV
-          echo "✅ Extension prepared at: $EXT_PATH"
 
-      # =========================================
-      # 4. 🚀 Puppeteer + OTMenT Orchestrator
-      # =========================================
-      - name: Run Puppeteer Orchestrator
+          echo "📦 Copying Chrome extension from: $EXT_SRC"
+          cp -r "$EXT_SRC/." "$TMP_EXT/"
+          sudo chmod -R 755 "$TMP_EXT" || true
+
+          echo "EXTENSION_PATH=$TMP_EXT" >> $GITHUB_ENV
+          echo "CHROME_ARGS=--no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080 --disable-extensions-except=$TMP_EXT --load-extension=$TMP_EXT" >> $GITHUB_ENV
+          echo "✅ Extension ready at: $TMP_EXT"
+
+      # ===========================
+      # 4. Puppeteer Orchestration
+      # ===========================
+      - name: 🚀 Run Puppeteer orchestrator
         env:
-          CHROME_PATH: ${{ env.CHROME_BIN }}
-          EXTENSION_PATH: ${{ env.EXTENSION_PATH }}
+          CI: true
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
-          TEST_PAGE_URL: "https://www.peoplesearchnow.com/address/195-new-lots-avenue_brooklyn-ny"
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/service-account.json
+          CHROME_PATH: ${{ env.CHROME_BIN }}
+          TEST_PAGE_URL: "https://www.fastpeoplesearch.com/address/123-main-st_98001"
+          DEBUG: puppeteer:*
         run: |
-          echo "🚀 Starting Puppeteer with OTMenT extension..."
-          mkdir -p artifacts/diagnostics
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
-            node scripts/orchestrator.js || echo "⚠️ Puppeteer run exited with code $?"
+          echo "🚀 Launching Puppeteer orchestrator..."
+          export PUPPETEER_EXECUTABLE_PATH="${CHROME_PATH}"
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" node scripts/orchestrator.js
+        timeout-minutes: 35
 
-      # =========================================
-      # 5. 📦 Post-run and Cleanup
-      # =========================================
-      - name: Collect Logs
+      # ===========================
+      # 5. Post-Run Cleanup
+      # ===========================
+      - name: 🧾 Collect diagnostics and screenshots
         if: always()
         run: |
-          mkdir -p artifacts/diagnostics
-          cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
-          echo "✅ Logs collected."
+          ls -la artifacts/screenshots || true
+          [ -f /tmp/openvpn.log ] && cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
 
-      - name: Disconnect VPN
+      - name: 🔌 Disconnect VPN
         if: always()
         run: |
           sudo pkill -f openvpn || true
           echo "✅ VPN disconnected."
 
-      - name: Upload artifacts
+      - name: 📤 Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: otment-artifacts
-          path: artifacts/**
+          name: browser-artifacts
+          path: |
+            artifacts/diagnostics/**
+            artifacts/screenshots/**
+            artifacts/videos/**
