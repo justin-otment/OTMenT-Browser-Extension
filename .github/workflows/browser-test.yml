@@ -12,6 +12,7 @@ permissions:
 jobs:
   browser:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       # =========================================
@@ -49,7 +50,10 @@ jobs:
         env:
           CI: true
         run: |
+          echo "📦 Installing Node dependencies..."
           npm ci --ignore-scripts || npm install --legacy-peer-deps
+          echo "📦 Installing Puppeteer (required in CI)..."
+          npm install puppeteer
 
       - name: 🔐 Decode service account key
         run: |
@@ -59,7 +63,10 @@ jobs:
       - name: Detect Chrome binary
         id: chrome
         run: |
-          CHROME_BIN=$(which google-chrome || which chromium)
+          CHROME_BIN=$(which google-chrome || which chromium || true)
+          if [ -z "$CHROME_BIN" ]; then
+            echo "❌ Chrome binary not found"; exit 1;
+          fi
           echo "CHROME_BIN=$CHROME_BIN" >> $GITHUB_ENV
           "$CHROME_BIN" --version
 
@@ -79,8 +86,10 @@ jobs:
             --auth-user-pass "$AUTH_FILE" \
             --daemon --writepid /tmp/openvpn.pid \
             --log /tmp/openvpn.log
-          sleep 8
-          curl -s https://ifconfig.me
+          echo "🕐 Waiting for VPN to establish..."
+          sleep 10
+          echo "🌎 External IP (via VPN):"
+          curl -s https://ifconfig.me || true
 
       # =========================================
       # 3. 🧱 Prepare Extension
@@ -106,10 +115,12 @@ jobs:
           EXTENSION_PATH: ${{ env.EXTENSION_PATH }}
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
           TEST_PAGE_URL: "https://www.peoplesearchnow.com/address/195-new-lots-avenue_brooklyn-ny"
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/service-account.json
         run: |
           echo "🚀 Starting Puppeteer with OTMenT extension..."
+          mkdir -p artifacts/diagnostics
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
-            node scripts/orchestrator.js
+            node scripts/orchestrator.js || echo "⚠️ Puppeteer run exited with code $?"
 
       # =========================================
       # 5. 📦 Post-run and Cleanup
@@ -119,6 +130,7 @@ jobs:
         run: |
           mkdir -p artifacts/diagnostics
           cp /tmp/openvpn.log artifacts/diagnostics/openvpn.log || true
+          echo "✅ Logs collected."
 
       - name: Disconnect VPN
         if: always()
