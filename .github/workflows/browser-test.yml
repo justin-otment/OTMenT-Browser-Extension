@@ -164,21 +164,19 @@ jobs:
           echo "CHROME_ARGS=--no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080 --disable-extensions-except=$TMP_EXT --load-extension=$TMP_EXT" >> $GITHUB_ENV
           echo "✅ Extension ready at: $TMP_EXT"
 
-      # ===========================
-      # 4. Puppeteer Orchestration
-      # ===========================
-      - name: 🚀 Run Puppeteer orchestrator
+      - name: 🚀 Run OTMenT automation via Puppeteer
         env:
           CI: true
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
           CHROME_PATH: ${{ env.CHROME_BIN }}
-          TEST_PAGE_URL: "https://www.fastpeoplesearch.com/address/123-main-st_98001"
-          DEBUG: puppeteer:*
+          CONFIG_PATH: config.json
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: |
-          echo "🚀 Launching Puppeteer orchestrator..."
+          echo "🚀 Launching OTMenT automation..."
           export PUPPETEER_EXECUTABLE_PATH="${CHROME_PATH}"
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" node scripts/orchestrator.js
-        timeout-minutes: 35
+        timeout-minutes: 45
+
 
       # ===========================
       # 5. Post-Run Cleanup
