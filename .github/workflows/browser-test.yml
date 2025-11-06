@@ -51,6 +51,11 @@ jobs:
         run: |
           npm ci --ignore-scripts || npm install --legacy-peer-deps
 
+      - name: 🔐 Decode service account key
+        run: |
+          echo "${{ secrets.GSHEETS_SERVICE_KEY_B64 }}" | base64 --decode > service-account.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/service-account.json" >> $GITHUB_ENV
+
       - name: Detect Chrome binary
         id: chrome
         run: |
