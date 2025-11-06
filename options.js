@@ -3,6 +3,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const apiModeSelect = document.getElementById('apiMode');
   const saveBtn = document.getElementById('save');
   const resetBtn = document.getElementById('reset');
+  const updateBtn = document.getElementById('update');
+  const toggleBtn = document.getElementById('toggle');
   const statusEl = document.getElementById('status');
 
   if (!apiKeyInput || !apiModeSelect || !saveBtn || !resetBtn || !statusEl) {
@@ -13,9 +15,20 @@ document.addEventListener("DOMContentLoaded", () => {
   const MIN_KEY_LENGTH = 32; // 2Captcha keys are 32 chars
   saveBtn.disabled = true;
 
-  // Load saved settings
-  chrome.storage.local.get(['solver_api_key', 'solver_api_mode'], (res) => {
-    const { solver_api_key, solver_api_mode } = res;
+  // Promise helpers for storage
+  const storageGet = (keys) =>
+    new Promise((resolve) => chrome.storage.local.get(keys, resolve));
+  const storageSet = (obj) =>
+    new Promise((resolve, reject) =>
+      chrome.storage.local.set(obj, () => {
+        if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+        else resolve();
+      })
+    );
+
+  // Load saved settings + enabled flag
+  chrome.storage.local.get(['solver_api_key', 'solver_api_mode', 'extension_enabled'], (res) => {
+    const { solver_api_key, solver_api_mode, extension_enabled } = res;
     if (solver_api_key) {
       apiKeyInput.value = solver_api_key;
       if (solver_api_key.length >= MIN_KEY_LENGTH) {
@@ -23,6 +36,10 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
     apiModeSelect.value = solver_api_mode || 'json';
+
+    // Initialize toggle button label (default ON if undefined)
+    const enabled = extension_enabled !== false;
+    updateToggleUI(enabled);
   });
 
   // Enable save when typing
@@ -88,6 +105,39 @@ document.addEventListener("DOMContentLoaded", () => {
       });
     }
   });
+
+  // Reload Extension handler
+  if (updateBtn) {
+    updateBtn.addEventListener('click', () => {
+      if (confirm("Reload the extension now?")) {
+        showStatus("🔄 Reloading extension…", "blue");
+        chrome.runtime.reload();
+      }
+    });
+  }
+
+  // Toggle On/Off handler (using promisified storage)
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', async () => {
+      try {
+        const { extension_enabled } = await storageGet('extension_enabled');
+        const current = extension_enabled !== false; // default ON if undefined
+        const newState = !current;
+        await storageSet({ extension_enabled: newState });
+        updateToggleUI(newState);
+        showStatus(newState ? "✅ Extension ON" : "⏻ Extension OFF", newState ? "green" : "red");
+      } catch (err) {
+        console.error("Toggle error:", err);
+        showStatus("❌ Failed to toggle ON/OFF", "red");
+      }
+    });
+  }
+
+  function updateToggleUI(state) {
+    if (toggleBtn) {
+      toggleBtn.textContent = state ? "⏻ Turn OFF" : "⏻ Turn ON";
+    }
+  }
 
   function showStatus(msg, color) {
     statusEl.textContent = msg;
