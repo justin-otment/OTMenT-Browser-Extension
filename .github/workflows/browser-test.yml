@@ -170,7 +170,6 @@ jobs:
       - name: 🚀 Run Puppeteer orchestrator
         env:
           CI: true
-          CONFIG_PATH: config.json
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
           CHROME_PATH: ${{ env.CHROME_BIN }}
           TEST_PAGE_URL: "https://www.fastpeoplesearch.com/address/123-main-st_98001"
