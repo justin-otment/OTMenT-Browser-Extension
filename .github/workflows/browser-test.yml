@@ -48,6 +48,13 @@ jobs:
           restore-keys: |
             npm-cache-${{ runner.os }}-
 
+      - name: 💾 Cache Puppeteer Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: puppeteer-${{ runner.os }}-
+
       - name: 📦 Install npm packages (robust)
         env:
           CI: true
@@ -60,6 +67,29 @@ jobs:
             echo "⚠ npm ci failed — falling back to npm install --legacy-peer-deps"
             npm install --legacy-peer-deps --no-audit --no-fund
           fi
+
+      - name: 🧠 Verify Puppeteer Chromium setup
+        run: |
+          set -e
+          echo "🔍 Checking Puppeteer setup..."
+          node - <<'EOF'
+          import puppeteer from 'puppeteer';
+          (async () => {
+            try {
+              const browser = await puppeteer.launch({
+                headless: true,
+                args: ['--no-sandbox', '--disable-setuid-sandbox']
+              });
+              const version = await browser.version();
+              console.log("✅ Puppeteer successfully launched:", version);
+              await browser.close();
+            } catch (err) {
+              console.error("❌ Puppeteer sanity check failed:");
+              console.error(err);
+              process.exit(1);
+            }
+          })();
+          EOF
 
       - name: 🕵️ Locate Chrome binary
         id: chrome-bin
@@ -149,7 +179,6 @@ jobs:
           rm -rf "$TMP_EXT"
           mkdir -p "$TMP_EXT"
 
-          # 🔍 Detect actual extension folder (where manifest.json lives)
           EXT_SRC=$(find "${GITHUB_WORKSPACE}" -maxdepth 3 -name "manifest.json" -printf '%h\n' | head -n1)
           if [ -z "$EXT_SRC" ]; then
             echo "❌ manifest.json not found in repository — cannot load extension"
