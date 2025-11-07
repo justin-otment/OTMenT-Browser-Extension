@@ -5,6 +5,23 @@ import puppeteer from "puppeteer-core";
 import fs from "fs";
 import path from "path";
 
+// --- Fibonacci-based sleep controller ---
+function fibonacciGenerator() {
+  let a = 1, b = 1;
+  return () => {
+    const next = a;
+    [a, b] = [b, a + b];
+    return next;
+  };
+}
+const nextFib = fibonacciGenerator();
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const fibSleep = async (multiplier = 1000) => {
+  const delay = nextFib() * multiplier;
+  console.log(`⏳ Waiting ${delay}ms (Fibonacci delay)`);
+  await sleep(delay);
+};
+
 (async () => {
   const EXT_PATH = process.env.EXTENSION_PATH;
   const CHROME_BIN = process.env.CHROME_PATH;
@@ -15,7 +32,7 @@ import path from "path";
   console.log("🔧 Using Chrome binary:", CHROME_BIN);
   console.log("📘 Config path:", CONFIG_PATH);
 
-  // --- Load config.json (optional)
+  // --- Load config.json or fallback
   let testUrls = [
     "https://www.peoplesearchnow.com/address/195-new-lots-avenue_brooklyn-ny",
     "https://www.peoplesearchnow.com/address/2702-6th-street-southwest_lehigh-acres-fl",
@@ -29,6 +46,8 @@ import path from "path";
   } catch {
     console.log("⚠️ Could not read config.json, using fallback URLs.");
   }
+
+  await fibSleep();
 
   // --- Launch Chrome
   const browser = await puppeteer.launch({
@@ -45,15 +64,11 @@ import path from "path";
   });
 
   const [page] = await browser.pages();
-
-  // --- Compatibility-safe delay helper
-  const sleep = async (ms) =>
-    new Promise((resolve) => setTimeout(resolve, ms));
-
   await page.goto("chrome://extensions", { waitUntil: "domcontentloaded" });
   console.log("✅ Extension loaded and Chrome launched");
+  await fibSleep();
 
-  // --- Listen for logs emitted by the extension
+  // --- Collect extension logs
   const results = [];
   page.on("console", async (msg) => {
     const text = msg.text();
@@ -74,19 +89,21 @@ import path from "path";
     console.log(`🌐 Visiting: ${url}`);
     try {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-      await sleep(10000); // give OTMenT time to scrape
+      await fibSleep(2000); // Fibonacci delay between navigations
     } catch (err) {
       console.warn(`⚠️ Failed to visit ${url}: ${err.message}`);
     }
   }
+
+  await fibSleep();
 
   // --- Save results
   fs.mkdirSync(path.dirname(OUT_PATH), { recursive: true });
   fs.writeFileSync(OUT_PATH, JSON.stringify(results, null, 2));
   console.log(`💾 Results saved to ${OUT_PATH}`);
 
-  await sleep(3000);
-  await browser.close();
-  console.log("✅ Puppeteer orchestrator complete");
-})();
+  await fibSleep();
 
+  await browser.close();
+  console.log("✅ Puppeteer orchestrator complete (with Fibonacci pacing)");
+})();
