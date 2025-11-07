@@ -1,7 +1,7 @@
 // ===================================================
 // === OTMenT v3 - Puppeteer Orchestrator (CI Mode) ===
 // ===================================================
-import puppeteer from "puppeteer";
+import puppeteer from "puppeteer-core";
 import fs from "fs";
 import path from "path";
 
@@ -89,3 +89,4 @@ import path from "path";
   await browser.close();
   console.log("✅ Puppeteer orchestrator complete");
 })();
+
