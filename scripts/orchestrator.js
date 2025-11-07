@@ -1,7 +1,7 @@
 // ===================================================
 // === OTMenT v3 - Puppeteer Orchestrator (CI Mode) ===
 // ===================================================
-import puppeteer from "puppeteer-core";
+import puppeteer from "puppeteer";
 import fs from "fs";
 import path from "path";
 
@@ -107,3 +107,4 @@ const fibSleep = async (multiplier = 1000) => {
   await browser.close();
   console.log("✅ Puppeteer orchestrator complete (with Fibonacci pacing)");
 })();
+
