@@ -68,16 +68,25 @@ jobs:
             npm install --legacy-peer-deps --no-audit --no-fund
           fi
 
+      - name: 🧩 Export Chrome binary for Puppeteer
+        run: |
+          CHROME_BIN=$(which google-chrome || which chromium || true)
+          echo "✅ Found Chrome binary: $CHROME_BIN"
+          echo "PUPPETEER_EXECUTABLE_PATH=$CHROME_BIN" >> $GITHUB_ENV
+          echo "CHROME_PATH=$CHROME_BIN" >> $GITHUB_ENV
+
       - name: 🧠 Verify Puppeteer Chromium setup
         run: |
           set -e
           echo "🔍 Checking Puppeteer setup..."
           node - <<'EOF'
-          import puppeteer from 'puppeteer';
+          import puppeteer from 'puppeteer-core';
+          const browserPath = process.env.PUPPETEER_EXECUTABLE_PATH;
           (async () => {
             try {
               const browser = await puppeteer.launch({
                 headless: true,
+                executablePath: browserPath,
                 args: ['--no-sandbox', '--disable-setuid-sandbox']
               });
               const version = await browser.version();
