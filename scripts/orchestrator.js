@@ -1,7 +1,7 @@
 // ===================================================
 // === OTMenT v3 - Puppeteer Orchestrator (CI Mode) ===
 // ===================================================
-import puppeteer from "puppeteer";
+import puppeteer from "puppeteer-core"; // use puppeteer-core for CI
 import fs from "fs";
 import path from "path";
 
@@ -23,12 +23,12 @@ const fibSleep = async (multiplier = 1000) => {
 };
 
 (async () => {
-  const EXT_PATH = process.env.EXTENSION_PATH;
-  const CHROME_BIN = process.env.CHROME_PATH;
+  const EXT_PATH = process.env.EXTENSION_PATH || "";
+  const CHROME_BIN = process.env.CHROME_PATH || "/usr/bin/google-chrome";
   const CONFIG_PATH = process.env.CONFIG_PATH || "config.json";
   const OUT_PATH = "artifacts/diagnostics/dataExtracted.json";
 
-  console.log("🚀 Launching Chrome with extension:", EXT_PATH);
+  console.log("🚀 Launching Chrome with extension:", EXT_PATH || "none");
   console.log("🔧 Using Chrome binary:", CHROME_BIN);
   console.log("📘 Config path:", CONFIG_PATH);
 
@@ -37,36 +37,56 @@ const fibSleep = async (multiplier = 1000) => {
     "https://www.peoplesearchnow.com/address/195-new-lots-avenue_brooklyn-ny",
     "https://www.peoplesearchnow.com/address/2702-6th-street-southwest_lehigh-acres-fl",
   ];
+  let useHeadless = true;
   try {
     const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
     if (Array.isArray(cfg.startUrl) && cfg.startUrl.length) {
       testUrls = cfg.startUrl;
       console.log("✅ Loaded URLs from config.json");
     }
+    if (typeof cfg.useHeadless === "boolean") {
+      useHeadless = cfg.useHeadless;
+    }
   } catch {
     console.log("⚠️ Could not read config.json, using fallback URLs.");
   }
 
+  // --- Extension forces non-headless
+  if (EXT_PATH) {
+    useHeadless = false;
+    console.log("⚙️ Extension detected — forcing non-headless mode");
+  }
+
+  console.log(`🧩 Headless mode: ${useHeadless}`);
+
   await fibSleep();
 
   // --- Launch Chrome
+  const launchArgs = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--remote-debugging-port=9222",
+    "--window-size=1920,1080",
+  ];
+
+  if (EXT_PATH) {
+    launchArgs.push(`--disable-extensions-except=${EXT_PATH}`);
+    launchArgs.push(`--load-extension=${EXT_PATH}`);
+  }
+
   const browser = await puppeteer.launch({
-    headless: false,
+    headless: useHeadless,
     executablePath: CHROME_BIN,
-    args: [
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      `--disable-extensions-except=${EXT_PATH}`,
-      `--load-extension=${EXT_PATH}`,
-      "--remote-debugging-port=9222",
-      "--window-size=1920,1080",
-    ],
+    args: launchArgs,
   });
 
   const [page] = await browser.pages();
-  await page.goto("chrome://extensions", { waitUntil: "domcontentloaded" });
-  console.log("✅ Extension loaded and Chrome launched");
-  await fibSleep();
+
+  if (EXT_PATH) {
+    await page.goto("chrome://extensions", { waitUntil: "domcontentloaded" });
+    console.log("✅ Extension loaded and Chrome launched");
+    await fibSleep();
+  }
 
   // --- Collect extension logs
   const results = [];
@@ -107,4 +127,3 @@ const fibSleep = async (multiplier = 1000) => {
   await browser.close();
   console.log("✅ Puppeteer orchestrator complete (with Fibonacci pacing)");
 })();
-
