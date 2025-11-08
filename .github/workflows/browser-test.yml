@@ -117,6 +117,9 @@ jobs:
       - name: 🗂️ Prepare artifact directories
         run: mkdir -p artifacts/{screenshots,diagnostics,videos}
 
+      # ===========================
+      # 2. VPN Rotation (Mock-Safe)
+      # ===========================
       - name: 🔁 Rotate and connect OpenVPN
         run: |
           set -euo pipefail
@@ -125,6 +128,11 @@ jobs:
           STATE_FILE="$VPN_DIR/rotation_state.txt"
           PIDFILE="/tmp/openvpn.pid"
           LOGFILE="/tmp/openvpn.log"
+
+          # --- Ensure log file is writable ---
+          sudo rm -f "$LOGFILE" 2>/dev/null || true
+          sudo touch "$LOGFILE"
+          sudo chmod 666 "$LOGFILE"
 
           # --- Helper: Safe IP fetch ---
           get_ip() {
@@ -156,17 +164,8 @@ jobs:
           echo "🌐 Base IP: $BASE_IP"
 
           # --- Mock mode check ---
-          if [ ! -e /dev/net/tun ]; then
-            echo "⚠️  /dev/net/tun not found — sandbox environment detected."
-            echo "🧩 Entering mock VPN mode (no real OpenVPN run)."
-            mkdir -p "$(dirname "$LOGFILE")"
-            echo "[mock vpn] $(date)" > "$LOGFILE"
-            echo "🌐 (mock) VPN simulated successfully."
-            exit 0
-          fi
-
-          if ! sudo modprobe tun 2>/dev/null; then
-            echo "⚠️  Unable to load TUN kernel module — switching to mock VPN mode."
+          if [ ! -e /dev/net/tun ] || ! sudo modprobe tun 2>/dev/null; then
+            echo "⚠️  TUN not available — entering mock VPN mode."
             echo "[mock vpn] $(date)" > "$LOGFILE"
             echo "🌐 (mock) VPN simulated successfully."
             exit 0
@@ -175,6 +174,7 @@ jobs:
           # --- Attempt OpenVPN ---
           echo "🚀 Starting OpenVPN..."
           sudo pkill -f openvpn || true
+          VPN_FAIL=0
           if grep -q "auth-user-pass" "$NEXT"; then
             sudo nohup openvpn --config "$NEXT" \
               --auth-user-pass "$AUTH_FILE" \
@@ -184,12 +184,9 @@ jobs:
               --daemon --writepid "$PIDFILE" --log "$LOGFILE" || VPN_FAIL=1
           fi
 
-          # --- Check for failure ---
           sleep 5
-          if [ ! -f "$PIDFILE" ] || [ "${VPN_FAIL:-0}" -eq 1 ]; then
-            echo "⚠️  OpenVPN failed to launch (likely restricted in GitHub Actions)."
-            echo "🧩 Entering mock VPN mode to continue CI safely."
-            mkdir -p "$(dirname "$LOGFILE")"
+          if [ ! -f "$PIDFILE" ] || [ "$VPN_FAIL" -eq 1 ]; then
+            echo "⚠️  OpenVPN failed — switching to mock VPN mode."
             echo "[mock vpn fallback] $(date)" > "$LOGFILE"
             echo "🌐 (mock) VPN simulated successfully."
             exit 0
@@ -200,19 +197,22 @@ jobs:
             ip a show tun0 &>/dev/null && break
             sleep 1
           done
-          ip a show tun0 &>/dev/null || { echo "❌ VPN interface not found"; tail -n 100 "$LOGFILE"; exit 1; }
+          if ! ip a show tun0 &>/dev/null; then
+            echo "❌ VPN interface not found"
+            tail -n 100 "$LOGFILE" || true
+            exit 1
+          fi
 
           VPN_IP=$(get_ip)
           echo "🌐 VPN IP: $VPN_IP"
 
           if [ "$VPN_IP" == "$BASE_IP" ] || [ "$VPN_IP" == "unknown" ]; then
             echo "❌ VPN connection failed to change IP"
-            tail -n 100 "$LOGFILE"
+            tail -n 100 "$LOGFILE" || true
             exit 1
           else
             echo "✅ VPN connection established successfully!"
           fi
-
 
       # ===========================
       # 3. Chrome + Extension Setup
