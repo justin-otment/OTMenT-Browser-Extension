@@ -155,7 +155,7 @@ jobs:
       # 4. Orchestrator Runner (CI)
       # ===========================
       - name: 🚀 Run OTMenT CI Orchestrator
-        run: scripts/orchestrator-navigator.js
+        run: navigator.js
 
       # ===========================
       # 5. Post-Run Cleanup
