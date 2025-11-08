@@ -110,6 +110,12 @@ const fibSleep = async (multiplier = 1000) => {
     try {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
       await fibSleep(2000); // Fibonacci delay between navigations
+  
+      // --- Save screenshot per URL ---
+      const safeName = url.replace(/[^a-z0-9]/gi, "_").slice(0, 50);
+      const screenshotPath = `artifacts/screenshots/${safeName}.png`;
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      console.log(`📸 Screenshot saved: ${screenshotPath}`);
     } catch (err) {
       console.warn(`⚠️ Failed to visit ${url}: ${err.message}`);
     }
@@ -127,3 +133,4 @@ const fibSleep = async (multiplier = 1000) => {
   await browser.close();
   console.log("✅ Puppeteer orchestrator complete (with Fibonacci pacing)");
 })();
+
