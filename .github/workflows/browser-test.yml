@@ -242,7 +242,14 @@ jobs:
       # 4. Orchestrator Runner
       # ===========================
       - name: 🚀 Run OTMenT CI Orchestrator
-        run: node scripts/orchestrator.js
+        run: |
+          if [ -n "$EXTENSION_PATH" ]; then
+            echo "⚙️ Extension detected — running under xvfb-run"
+            xvfb-run -a node scripts/orchestrator.js
+          else
+            echo "⚙️ No extension — running headless"
+            node scripts/orchestrator.js
+          fi
 
       # ===========================
       # 5. Post-Run Cleanup
