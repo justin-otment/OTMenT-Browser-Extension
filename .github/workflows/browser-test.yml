@@ -248,7 +248,7 @@ jobs:
             xvfb-run -a node scripts/orchestrator.js
           else
             echo "⚙️ No extension — running headless"
-            node scripts/orchestrator.js
+            node scripts/navigator.js
           fi
 
       # ===========================
