@@ -12,6 +12,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+async function takeSnapshot(tabId, label) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.captureVisibleTab(null, { format: "png" }, (dataUrl) => {
+      if (chrome.runtime.lastError) {
+        console.warn("[OTMenT] ❌ Snapshot failed:", chrome.runtime.lastError.message);
+        return reject(chrome.runtime.lastError);
+      }
+      console.log(`[OTMenT] 📸 Snapshot captured for ${label} (base64 length ${dataUrl.length})`);
+      // Option A: send to orchestrator via console
+      console.log("dataExtracted:snapshot", JSON.stringify({ url: label, image: dataUrl }));
+      resolve(dataUrl);
+    });
+  });
+}
+
 let config = null;
 let rsaPrivateKey;
 let serviceAccount;
@@ -405,6 +420,8 @@ async function runNavigator() {
               : [];
 
             console.log("[OTMenT] Detail extracted (from content.js):", detailTiles);
+
+            await takeSnapshot(tabId, entry.url);
 
             if (!detailTiles.length) {
               console.warn("[OTMenT] ❌ No person tiles found on detail page");
