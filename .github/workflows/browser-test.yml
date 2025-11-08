@@ -129,22 +129,26 @@ jobs:
           PIDFILE="/tmp/openvpn.pid"
           LOGFILE="/tmp/openvpn.log"
 
+          # --- Ensure log file is writable ---
           sudo rm -f "$LOGFILE" 2>/dev/null || true
           sudo touch "$LOGFILE"
           sudo chmod 666 "$LOGFILE"
 
+          # --- Helper: Safe IP fetch ---
           get_ip() {
             local ip
             ip=$(curl -sS https://api.ipify.org || curl -sS https://ifconfig.me || curl -sS https://ifconfig.co/ip || echo "unknown")
             [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && echo "$ip" || echo "unknown"
           }
 
+          # --- Collect .ovpn files ---
           mapfile -t OVPN_LIST < <(find "$VPN_DIR" -maxdepth 1 -type f -name "*.ovpn" | sort)
           if [ ${#OVPN_LIST[@]} -eq 0 ]; then
             echo "❌ No .ovpn found in $VPN_DIR"; exit 1
           fi
           [ -f "$AUTH_FILE" ] || { echo "❌ Missing $AUTH_FILE"; exit 1; }
 
+          # --- Rotation logic ---
           if [ -f "$STATE_FILE" ]; then
             LAST=$(cat "$STATE_FILE" || true)
             IDX=$(printf '%s\n' "${OVPN_LIST[@]}" | grep -nFx "$LAST" | cut -d: -f1 || echo 0)
@@ -159,6 +163,7 @@ jobs:
           BASE_IP=$(get_ip)
           echo "🌐 Base IP: $BASE_IP"
 
+          # --- Mock mode check ---
           if [ ! -e /dev/net/tun ] || ! sudo modprobe tun 2>/dev/null; then
             echo "⚠️  TUN not available — entering mock VPN mode."
             echo "[mock vpn] $(date)" > "$LOGFILE"
@@ -166,6 +171,7 @@ jobs:
             exit 0
           fi
 
+          # --- Attempt OpenVPN ---
           echo "🚀 Starting OpenVPN..."
           sudo pkill -f openvpn || true
           VPN_FAIL=0
