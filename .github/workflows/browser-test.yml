@@ -245,10 +245,10 @@ jobs:
         run: |
           if [ -n "$EXTENSION_PATH" ]; then
             echo "⚙️ Extension detected — running under xvfb-run"
-            xvfb-run -a node scripts/orchestrator.js
+            xvfb-run -a node scripts/orchestrator-navigator.js
           else
             echo "⚙️ No extension — running headless"
-            node scripts/orchestrator.js
+            node scripts/orchestrator-navigator.js
           fi
 
       # ===========================
