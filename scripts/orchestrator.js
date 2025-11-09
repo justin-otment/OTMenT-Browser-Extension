@@ -1,5 +1,6 @@
 // ===================================================
-// === OTMenT v3.1 - Puppeteer Orchestrator (Extension Kickoff + Diagnostics)
+// === OTMenT v3.2 - Puppeteer Orchestrator
+// === Includes handshake detection + kickoff retry
 // ===================================================
 import puppeteer from "puppeteer-core";
 import fs from "fs";
@@ -18,7 +19,7 @@ import path from "path";
   console.log("📘 Config path:", CONFIG_PATH);
 
   // ===================================================
-  // === Launch Arguments (realistic desktop simulation)
+  // === Launch Arguments
   // ===================================================
   const args = [
     "--no-sandbox",
@@ -36,7 +37,7 @@ import path from "path";
   }
 
   // ===================================================
-  // === Launch Chrome (must be non-headless)
+  // === Launch Chrome (non-headless)
   // ===================================================
   const browser = await puppeteer.launch({
     headless: false,
@@ -47,10 +48,9 @@ import path from "path";
   const [page] = await browser.pages();
 
   // ===================================================
-  // === Load Extensions Page & Verify Activation
+  // === Verify Extension Load
   // ===================================================
   await page.goto("chrome://extensions/", { waitUntil: "load" });
-
   console.log("🔍 Checking loaded extensions...");
   await page.waitForTimeout(2000);
 
@@ -76,7 +76,7 @@ import path from "path";
   }
 
   // ===================================================
-  // === Artifact Setup
+  // === Prepare Artifacts
   // ===================================================
   fs.mkdirSync(path.dirname(OUT_JSON), { recursive: true });
   fs.mkdirSync(OUT_SCREEN_DIR, { recursive: true });
@@ -84,11 +84,27 @@ import path from "path";
   const results = [];
 
   // ===================================================
-  // === Listen for Extension Console Messages
+  // === Listen for Extension Messages
   // ===================================================
+  let handshakeReceived = false;
+
   page.on("console", async (msg) => {
     const text = msg.text();
-    if (text.includes("dataExtracted")) {
+
+    // --- Handshake readiness
+    if (text.includes("dataExtracted:ready")) {
+      try {
+        const jsonPart = text.split("dataExtracted:ready")[1].trim();
+        console.log("🟢 Extension handshake received:", jsonPart);
+        handshakeReceived = true;
+      } catch {
+        handshakeReceived = true;
+        console.log("🟢 Extension handshake (non-JSON)");
+      }
+    }
+
+    // --- Data payloads
+    if (text.includes("dataExtracted:")) {
       try {
         const jsonPart = text.split("dataExtracted:")[1].trim();
         const parsed = JSON.parse(jsonPart);
@@ -108,7 +124,7 @@ import path from "path";
   });
 
   // ===================================================
-  // === Diagnostic: Log background pages / workers
+  // === Check Service Worker / Background Pages
   // ===================================================
   const targets = await browser.targets();
   const bgPages = targets.filter((t) => t.type() === "background_page");
@@ -118,13 +134,30 @@ import path from "path";
   console.log("🧠 Extension service workers:", serviceWorkers.map((t) => t.url()));
 
   // ===================================================
-  // === Optional Kickoff to Extension
+  // === Wait for Handshake (max 15s)
+  // ===================================================
+  console.log("⏳ Waiting for extension handshake...");
+  const HANDSHAKE_TIMEOUT = 15000;
+  const startTime = Date.now();
+
+  while (!handshakeReceived && Date.now() - startTime < HANDSHAKE_TIMEOUT) {
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  if (!handshakeReceived) {
+    console.warn("⚠️ No handshake received within timeout. Proceeding anyway.");
+  }
+
+  // ===================================================
+  // === Kickoff to Extension
   // ===================================================
   try {
     await page.evaluate(() => {
       if (chrome?.runtime?.sendMessage) {
         chrome.runtime.sendMessage({ action: "startNavigator" });
         console.log("📨 Kickoff message sent to navigator.js");
+      } else {
+        console.warn("⚠️ chrome.runtime not available yet.");
       }
     });
   } catch (err) {
@@ -132,7 +165,7 @@ import path from "path";
   }
 
   // ===================================================
-  // === Runtime Duration + Cleanup
+  // === Runtime + Cleanup
   // ===================================================
   const MAX_RUNTIME_MS = 5 * 60 * 1000;
   console.log(`⏳ Keeping browser alive for ${MAX_RUNTIME_MS / 1000 / 60} min...`);
