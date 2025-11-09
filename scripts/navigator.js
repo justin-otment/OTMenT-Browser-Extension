@@ -517,6 +517,19 @@ async function runNavigator() {
 }
 
 // ============================================
+// === Handshake: Notify Puppeteer that we're live
+// ============================================
+try {
+  console.log('dataExtracted:ready', JSON.stringify({
+    status: 'ok',
+    message: 'Navigator service worker initialized and ready'
+  }));
+} catch (e) {
+  console.warn('[OTMenT] ⚠️ Handshake emit failed:', e);
+}
+
+
+// ============================================
 // === Start
 // ============================================
 runNavigator();
