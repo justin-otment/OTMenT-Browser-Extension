@@ -1,4 +1,4 @@
-name: NodeJS with Webpack
+name: NodeJS with Webpack + Artifacts
 
 on:
   push:
@@ -10,7 +10,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    # Only test Node 20+ since some deps require >=20.18.1
     strategy:
       matrix:
         node-version: [20.x, 22.x]
@@ -31,3 +30,18 @@ jobs:
 
       - name: 🏗️ Build with Webpack
         run: npx webpack --mode production
+
+      # Optional: ZIP the dist folder for easy download
+      - name: 📦 Package extension files
+        if: success()
+        run: |
+          mkdir -p release
+          zip -r release/OTMenT_build_${{ github.run_number }}.zip dist
+
+      # Upload zipped build as artifact
+      - name: 📤 Upload build artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OTMenT_build_${{ github.run_number }}
+          path: release/OTMenT_build_${{ github.run_number }}.zip
