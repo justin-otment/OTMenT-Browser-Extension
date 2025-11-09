@@ -1,61 +1,71 @@
-  {
-    "manifest_version": 3,
-    "name": "OTMenT v3 — People Search Navigator",
-    "version": "1.7",
-    "description": "Config-driven scraper with Sheets integration, captcha detection, and dynamic orchestration.",
+{
+  "manifest_version": 3,
+  "name": "OTMenT v3 — People Search Navigator",
+  "version": "1.7.1",
+  "description": "Config-driven scraper with Sheets integration, captcha detection, and dynamic orchestration.",
 
-    "permissions": [
-      "scripting",
-      "storage",
-      "tabs",
-      "cookies",
-      "webRequest",
-      "activeTab"
-    ],
+  "minimum_chrome_version": "118",
 
-    "host_permissions": [
-      "https://www.peoplesearchnow.com/*",
-      "https://www.peoplesearchnow.com/InternalCaptcha?*",
-      "https://*.challenges.cloudflare.com/*",
-      "https://*.cloudflare.com/*",
-      "https://2captcha.com/*",
-      "https://api.2captcha.com/*",
-      "https://sheets.googleapis.com/*",
-      "https://oauth2.googleapis.com/*"
-    ],
+  "permissions": [
+    "scripting",
+    "storage",
+    "tabs",
+    "cookies",
+    "webRequest",
+    "activeTab"
+  ],
 
-    "background": {
-      "service_worker": "navigator.js",
-      "type": "module"
-    },
+  "host_permissions": [
+    "https://www.peoplesearchnow.com/*",
+    "http://www.peoplesearchnow.com/*",
+    "https://www.peoplesearchnow.com/InternalCaptcha?*",
+    "https://*.challenges.cloudflare.com/*",
+    "https://*.cloudflare.com/*",
+    "https://2captcha.com/*",
+    "https://api.2captcha.com/*",
+    "https://sheets.googleapis.com/*",
+    "https://oauth2.googleapis.com/*"
+  ],
 
-    "options_page": "options.html",
+  "background": {
+    "service_worker": "navigator.js",
+    "type": "module"
+  },
 
-    "web_accessible_resources": [
-      {
-        "resources": ["config.json", "service-account.json"],
-        "matches": ["<all_urls>"]
-      }
-    ],
+  "options_page": "options.html",
 
-    "content_scripts": [
-      {
-        "matches": [
-          "https://www.peoplesearchnow.com/details/*",
-          "https://www.peoplesearchnow.com/address*",
-          "https://www.peoplesearchnow.com/find/person/*",
-          "https://www.peoplesearchnow.com//name/*"
-        ],
-        "js": ["jquery-3.7.1.min.js", "content.js"],
-        "run_at": "document_idle"
-      }
-    ],
-
-    "content_security_policy": {
-      "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://2captcha.com https://api.2captcha.com https://challenges.cloudflare.com https://*.challenges.cloudflare.com https://*.cloudflare.com https://www.google.com/recaptcha/ https://oauth2.googleapis.com https://sheets.googleapis.com https://www.peoplesearchnow.com"
-    },
-
-    "action": {
-      "default_title": "OTMenT Navigator"
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "config.json",
+        "service-account.json"
+      ],
+      "matches": ["<all_urls>"]
     }
+  ],
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.peoplesearchnow.com/details/*",
+        "https://www.peoplesearchnow.com/address*",
+        "https://www.peoplesearchnow.com/find/person/*",
+        "https://www.peoplesearchnow.com/name/*"
+      ],
+      "js": ["jquery-3.7.1.min.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval' 'inline-speculation-rules'; object-src 'self'; connect-src 'self' https://2captcha.com https://api.2captcha.com https://challenges.cloudflare.com https://*.challenges.cloudflare.com https://*.cloudflare.com https://www.google.com/recaptcha/ https://oauth2.googleapis.com https://sheets.googleapis.com https://www.peoplesearchnow.com;"
+  },
+
+  "externally_connectable": {
+    "matches": ["*://localhost/*", "https://*.github.com/*", "https://actions.githubusercontent.com/*"]
+  },
+
+  "action": {
+    "default_title": "OTMenT Navigator"
   }
+}
