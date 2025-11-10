@@ -1,7 +1,7 @@
-const path = require("path");
-const CopyPlugin = require("copy-webpack-plugin");
+import path from "path";
+import CopyPlugin from "copy-webpack-plugin";
 
-module.exports = {
+export default {
   // ---------------- Entry points ----------------
   entry: {
     content: "./content.js",
@@ -13,8 +13,8 @@ module.exports = {
 
   // ---------------- Output ----------------
   output: {
-    path: path.resolve(__dirname, "dist"),
-    filename: "[name].js", // keep filenames same as entry
+    path: path.resolve("./dist"),
+    filename: "[name].js", // keep original names
   },
 
   // ---------------- Module rules ----------------
