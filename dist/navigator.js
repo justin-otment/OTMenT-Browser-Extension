@@ -448,7 +448,7 @@ async function runNavigator() {
 
             // --- Snapshot the detail page after extraction
             await takeSnapshot(tabId, best.href || entry.url);
-
+            
             if (!detailTiles.length) {
               console.warn("[OTMenT] ❌ No person tiles found on detail page");
               await writeResult(entry.row, "NO DATA");
@@ -512,4 +512,58 @@ async function runNavigator() {
           await logToSheet([bestDetail.detailData], entry.row, cfg, entry.siteVal); // <--- use row-aligned siteVal
           await writeResult(
             entry.row,
-            `MATCH (${bestDetail.score.
+            `MATCH (${bestDetail.score.toFixed(2)}) — ${bestDetail.detailData.Fullname || ""}${phones?.length ? ` | Phones: ${phones.join(", ")}` : ""}`
+          );
+        } else {
+          console.warn("[OTMenT] ❌ No valid matches found on detail page");
+          await writeResult(entry.row, `NO MATCH (${bestDetail.score.toFixed(2)})`);
+        }
+
+      } else {
+        console.warn("[OTMenT] Unknown page type, skipping.");
+        await writeResult(entry.row, "SKIPPED (unknown page type)");
+      }
+
+      // Apply cooldown every N iterations
+      if (i > 0 && i % (cfg.rateLimit?.cooldownEvery || 8) === 0) {
+        console.log("[OTMenT] Cooling down...");
+        await sleep(cfg.rateLimit?.cooldownMs || 30000);
+      }
+
+    } catch (err) {
+      console.warn(`[OTMenT] ⚠️ Error on ${entry.url}:`, err.message);
+      await writeResult(entry.row, `ERROR: ${err.message}`);
+    } finally {
+      await sleep(cfg.requestOptions?.incrementMs || 200);
+      if (tabId) chrome.tabs.remove(tabId);
+    }
+  }
+
+  console.log("[OTMenT] ✅ Matchmaking process complete.");
+}
+
+// ============================================
+// === Start
+// ============================================
+runNavigator();
+
+// Let orchestrator know extension is alive
+(async () => {
+  try {
+    await loadConfig();
+    console.log("dataExtracted:ready"); // 👈 Puppeteer waits for this
+  } catch (err) {
+    console.error("[OTMenT] ⚠️ Config load failed:", err);
+  }
+})();
+
+// Listen for orchestration start from Puppeteer
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.action === "startNavigator") {
+    console.log("[OTMenT] 🧭 Received startNavigator — beginning main loop...");
+    runNavigator()
+      .then(() => console.log("[OTMenT] ✅ Navigation run complete."))
+      .catch(err => console.error("[OTMenT] ❌ Navigator error:", err));
+    sendResponse({ status: "started" });
+  }
+});
