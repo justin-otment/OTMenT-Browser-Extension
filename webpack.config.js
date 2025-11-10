@@ -29,4 +29,4 @@ module.exports = {
 
   // Production mode for minification and optimization
   mode: "production",
-};
+}; 
