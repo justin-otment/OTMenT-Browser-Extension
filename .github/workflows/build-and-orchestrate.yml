@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout code
+      # 1️⃣ Checkout repository
       - name: 🧩 Checkout repository
         uses: actions/checkout@v4
 
@@ -25,7 +25,7 @@ jobs:
       - name: 📦 Install npm dependencies
         run: |
           npm ci || npm install
-          npm install -D webpack webpack-cli babel-loader @babel/core @babel/preset-env puppeteer-core
+          npm install -D webpack webpack-cli babel-loader @babel/core @babel/preset-env copy-webpack-plugin puppeteer-core
 
       # 4️⃣ Install Google Chrome
       - name: 📌 Install Google Chrome
@@ -37,11 +37,11 @@ jobs:
       - name: 📌 Install Xvfb
         run: sudo apt-get update && sudo apt-get install -y xvfb
 
-      # 6️⃣ Build JS with Webpack
+      # 6️⃣ Build JS with Webpack and copy static files
       - name: 🏗️ Build extension
         run: npx webpack --config webpack.config.js --mode production --stats-error-details
 
-      # 7️⃣ Create artifacts folders for orchestrator
+      # 7️⃣ Create artifacts folders for Puppeteer orchestrator
       - name: 📁 Prepare artifacts folders
         run: mkdir -p artifacts/screenshots artifacts/diagnostics
 
@@ -59,11 +59,6 @@ jobs:
           mkdir -p release
           zip -r release/OTMenT_build_${{ github.run_number }}.zip \
             dist \
-            manifest.json \
-            options.html \
-            jquery-3.7.1.min.js \
-            config.json \
-            config-schema.json \
             artifacts/screenshots \
             artifacts/diagnostics
 
