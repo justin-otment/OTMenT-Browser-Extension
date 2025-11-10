@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout code
+      # 1️⃣ Checkout repository
       - name: 🧩 Checkout repository
         uses: actions/checkout@v4
 
@@ -29,7 +29,7 @@ jobs:
 
       # 4️⃣ Build JS with Webpack (ES module config)
       - name: 🏗️ Build extension
-        run: node --experimental-specifier-resolution=node --loader ts-node/esm node_modules/.bin/webpack --mode production --stats-error-details
+        run: npx webpack --config webpack.config.js --mode production --stats-error-details
 
       # 5️⃣ Package extension safely (exclude service-account.json)
       - name: 📦 Package built extension
