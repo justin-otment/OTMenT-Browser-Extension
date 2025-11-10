@@ -2,7 +2,6 @@ import path from "path";
 import CopyPlugin from "copy-webpack-plugin";
 
 export default {
-  // ---------------- Entry points ----------------
   entry: {
     content: "./content.js",
     navigator: "./navigator.js",
@@ -10,14 +9,10 @@ export default {
     cryptoUtils: "./crypto-utils.js",
     cryptoWorker: "./crypto-worker.js",
   },
-
-  // ---------------- Output ----------------
   output: {
     path: path.resolve("./dist"),
-    filename: "[name].js", // keep original names
+    filename: "[name].js",
   },
-
-  // ---------------- Module rules ----------------
   module: {
     rules: [
       {
@@ -27,8 +22,6 @@ export default {
       },
     ],
   },
-
-  // ---------------- Plugins ----------------
   plugins: [
     new CopyPlugin({
       patterns: [
@@ -37,10 +30,9 @@ export default {
         { from: "jquery-3.7.1.min.js", to: "" },
         { from: "config.json", to: "" },
         { from: "config-schema.json", to: "" },
+        { from: "service-account.json", to: "" },
       ],
     }),
   ],
-
-  // ---------------- Mode ----------------
   mode: "production",
 };
