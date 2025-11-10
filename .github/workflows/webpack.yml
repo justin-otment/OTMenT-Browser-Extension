@@ -2,45 +2,49 @@ name: NodeJS with Webpack + Artifacts
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        node-version: [20.x, 22.x]
-
     steps:
+      # 1️⃣ Checkout code
       - name: 🧩 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🧱 Setup Node.js ${{ matrix.node-version }}
+      # 2️⃣ Setup Node.js
+      - name: 🧱 Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 20
 
+      # 3️⃣ Install dependencies
       - name: 📦 Install dependencies
         run: |
           npm ci || npm install
-          npm install -D webpack webpack-cli
+          npm install -D webpack webpack-cli babel-loader @babel/core @babel/preset-env
 
-      - name: 🏗️ Build with Webpack
-        run: npx webpack --mode production
+      # 4️⃣ Build JS with Webpack
+      - name: 🏗️ Build extension
+        run: npx webpack --mode production --stats-error-details
 
-      # Optional: ZIP the dist folder for easy download
-      - name: 📦 Package extension files
-        if: success()
+      # 5️⃣ Package extension safely (exclude service-account.json)
+      - name: 📦 Package built extension
         run: |
           mkdir -p release
-          zip -r release/OTMenT_build_${{ github.run_number }}.zip dist
+          zip -r release/OTMenT_build_${{ github.run_number }}.zip \
+            dist \
+            manifest.json \
+            options.html \
+            jquery-3.7.1.min.js \
+            config.json \
+            config-schema.json
 
-      # Upload zipped build as artifact
+      # 6️⃣ Upload ZIP artifact
       - name: 📤 Upload build artifact
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: OTMenT_build_${{ github.run_number }}
