@@ -59,7 +59,7 @@ import path from "path";
 
   console.log("🔍 Checking loaded extensions...");
   await page.goto("chrome://extensions/", { waitUntil: "load" });
-  await page.waitForTimeout(2000);
+  await new Promise(r => setTimeout(r, 2000)); // replaces page.waitForTimeout
 
   // Wait for handshake
   const HANDSHAKE_TIMEOUT = 15000;
