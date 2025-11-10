@@ -27,9 +27,9 @@ jobs:
           npm ci || npm install
           npm install -D webpack webpack-cli babel-loader @babel/core @babel/preset-env
 
-      # 4️⃣ Build JS with Webpack
+      # 4️⃣ Build JS with Webpack (ES module config)
       - name: 🏗️ Build extension
-        run: npx webpack --mode production --stats-error-details
+        run: node --experimental-specifier-resolution=node --loader ts-node/esm node_modules/.bin/webpack --mode production --stats-error-details
 
       # 5️⃣ Package extension safely (exclude service-account.json)
       - name: 📦 Package built extension
