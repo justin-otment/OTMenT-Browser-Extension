@@ -33,23 +33,27 @@ jobs:
           wget -q -O google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo apt install -y ./google-chrome.deb
 
-      # 5️⃣ Build JS with Webpack
+      # 5️⃣ Install Xvfb
+      - name: 📌 Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      # 6️⃣ Build JS with Webpack
       - name: 🏗️ Build extension
         run: npx webpack --config webpack.config.js --mode production --stats-error-details
 
-      # 6️⃣ Create artifacts folders for orchestrator
+      # 7️⃣ Create artifacts folders for orchestrator
       - name: 📁 Prepare artifacts folders
         run: mkdir -p artifacts/screenshots artifacts/diagnostics
 
-      # 7️⃣ Run Puppeteer orchestrator
-      - name: 🤖 Run Puppeteer orchestrator
-        run: node puppeteer-orchestrator.js
+      # 8️⃣ Run Puppeteer orchestrator in headful mode using Xvfb
+      - name: 🤖 Run Puppeteer orchestrator (headful with Xvfb)
+        run: xvfb-run -a node puppeteer-orchestrator.js
         env:
           EXTENSION_PATH: ./dist
           CONFIG_PATH: ./config.json
           CHROME_PATH: /usr/bin/google-chrome
 
-      # 8️⃣ Package built extension + orchestrator artifacts
+      # 9️⃣ Package built extension + orchestrator artifacts
       - name: 📦 Package extension and artifacts
         run: |
           mkdir -p release
@@ -63,7 +67,7 @@ jobs:
             artifacts/screenshots \
             artifacts/diagnostics
 
-      # 9️⃣ Upload ZIP artifact
+      # 🔟 Upload ZIP artifact
       - name: 📤 Upload build + orchestrator artifact
         uses: actions/upload-artifact@v4
         with:
