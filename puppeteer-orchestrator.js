@@ -1,10 +1,14 @@
 // ===================================================
-// === OTMenT v3.2 - Puppeteer Orchestrator
-// === Includes handshake detection + kickoff retry
+// === OTMenT v3.2 - Puppeteer Orchestrator (CI-ready)
 // ===================================================
 import puppeteer from "puppeteer-core";
 import fs from "fs";
 import path from "path";
+
+// ---------------- Helper sleep function ----------------
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 (async () => {
   const EXT_PATH = process.env.EXTENSION_PATH || "";
@@ -18,9 +22,7 @@ import path from "path";
   console.log("🔧 Using Chrome binary:", CHROME_BIN);
   console.log("📘 Config path:", CONFIG_PATH);
 
-  // ===================================================
-  // === Launch Arguments
-  // ===================================================
+  // ---------------- Launch Arguments ----------------
   const args = [
     "--no-sandbox",
     "--disable-dev-shm-usage",
@@ -36,9 +38,7 @@ import path from "path";
     args.push(`--load-extension=${EXT_PATH}`);
   }
 
-  // ===================================================
-  // === Launch Chrome (non-headless)
-  // ===================================================
+  // ---------------- Launch Chrome ----------------
   const browser = await puppeteer.launch({
     headless: false,
     executablePath: CHROME_BIN,
@@ -47,12 +47,10 @@ import path from "path";
 
   const [page] = await browser.pages();
 
-  // ===================================================
-  // === Verify Extension Load
-  // ===================================================
+  // ---------------- Verify Extension Load ----------------
   await page.goto("chrome://extensions/", { waitUntil: "load" });
   console.log("🔍 Checking loaded extensions...");
-  await page.waitForTimeout(2000);
+  await sleep(2000);
 
   const extensions = await page.evaluate(() => {
     const items = Array.from(document.querySelectorAll("extensions-item"));
@@ -75,17 +73,13 @@ import path from "path";
     console.log(`✅ Extension "${ourExt.name}" is active (id: ${ourExt.id})`);
   }
 
-  // ===================================================
-  // === Prepare Artifacts
-  // ===================================================
+  // ---------------- Prepare Artifacts ----------------
   fs.mkdirSync(path.dirname(OUT_JSON), { recursive: true });
   fs.mkdirSync(OUT_SCREEN_DIR, { recursive: true });
 
   const results = [];
 
-  // ===================================================
-  // === Listen for Extension Messages
-  // ===================================================
+  // ---------------- Listen for Extension Messages ----------------
   let handshakeReceived = false;
 
   page.on("console", async (msg) => {
@@ -123,9 +117,7 @@ import path from "path";
     }
   });
 
-  // ===================================================
-  // === Check Service Worker / Background Pages
-  // ===================================================
+  // ---------------- Check Service Worker / Background Pages ----------------
   const targets = await browser.targets();
   const bgPages = targets.filter((t) => t.type() === "background_page");
   const serviceWorkers = targets.filter((t) => t.type() === "service_worker");
@@ -133,24 +125,20 @@ import path from "path";
   console.log("🧠 Extension background pages:", bgPages.map((t) => t.url()));
   console.log("🧠 Extension service workers:", serviceWorkers.map((t) => t.url()));
 
-  // ===================================================
-  // === Wait for Handshake (max 15s)
-  // ===================================================
+  // ---------------- Wait for Handshake (max 15s) ----------------
   console.log("⏳ Waiting for extension handshake...");
   const HANDSHAKE_TIMEOUT = 15000;
   const startTime = Date.now();
 
   while (!handshakeReceived && Date.now() - startTime < HANDSHAKE_TIMEOUT) {
-    await new Promise((r) => setTimeout(r, 500));
+    await sleep(500);
   }
 
   if (!handshakeReceived) {
     console.warn("⚠️ No handshake received within timeout. Proceeding anyway.");
   }
 
-  // ===================================================
-  // === Kickoff to Extension
-  // ===================================================
+  // ---------------- Kickoff to Extension ----------------
   try {
     await page.evaluate(() => {
       if (chrome?.runtime?.sendMessage) {
@@ -164,12 +152,10 @@ import path from "path";
     console.warn("⚠️ Could not send kickoff message:", err.message);
   }
 
-  // ===================================================
-  // === Runtime + Cleanup
-  // ===================================================
+  // ---------------- Runtime + Cleanup ----------------
   const MAX_RUNTIME_MS = 5 * 60 * 1000;
   console.log(`⏳ Keeping browser alive for ${MAX_RUNTIME_MS / 1000 / 60} min...`);
-  await new Promise((resolve) => setTimeout(resolve, MAX_RUNTIME_MS));
+  await sleep(MAX_RUNTIME_MS);
 
   fs.writeFileSync(OUT_JSON, JSON.stringify(results, null, 2));
   console.log(`💾 Results saved to ${OUT_JSON}`);
