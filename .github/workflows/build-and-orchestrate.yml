@@ -1,0 +1,71 @@
+name: NodeJS Build + Puppeteer Orchestrator + Artifacts
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build-and-run:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1️⃣ Checkout code
+      - name: 🧩 Checkout repository
+        uses: actions/checkout@v4
+
+      # 2️⃣ Setup Node.js
+      - name: 🧱 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 3️⃣ Install dependencies
+      - name: 📦 Install npm dependencies
+        run: |
+          npm ci || npm install
+          npm install -D webpack webpack-cli babel-loader @babel/core @babel/preset-env puppeteer-core
+
+      # 4️⃣ Install Google Chrome
+      - name: 📌 Install Google Chrome
+        run: |
+          wget -q -O google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt install -y ./google-chrome.deb
+
+      # 5️⃣ Build JS with Webpack
+      - name: 🏗️ Build extension
+        run: npx webpack --config webpack.config.js --mode production --stats-error-details
+
+      # 6️⃣ Create artifacts folders for orchestrator
+      - name: 📁 Prepare artifacts folders
+        run: mkdir -p artifacts/screenshots artifacts/diagnostics
+
+      # 7️⃣ Run Puppeteer orchestrator
+      - name: 🤖 Run Puppeteer orchestrator
+        run: node puppeteer-orchestrator.js
+        env:
+          EXTENSION_PATH: ./dist
+          CONFIG_PATH: ./config.json
+          CHROME_PATH: /usr/bin/google-chrome
+
+      # 8️⃣ Package built extension + orchestrator artifacts
+      - name: 📦 Package extension and artifacts
+        run: |
+          mkdir -p release
+          zip -r release/OTMenT_build_${{ github.run_number }}.zip \
+            dist \
+            manifest.json \
+            options.html \
+            jquery-3.7.1.min.js \
+            config.json \
+            config-schema.json \
+            artifacts/screenshots \
+            artifacts/diagnostics
+
+      # 9️⃣ Upload ZIP artifact
+      - name: 📤 Upload build + orchestrator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OTMenT_build_${{ github.run_number }}
+          path: release/OTMenT_build_${{ github.run_number }}.zip
