@@ -1,42 +1,32 @@
-// ==============================================
-// Webpack Config for OTMenT Browser Extension
-// ==============================================
-import path from "path";
-import { fileURLToPath } from "url";
+const path = require("path");
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-export default {
-  mode: "production",
+module.exports = {
+  // Multiple entry points for your scripts
   entry: {
-    navigator: "./navigator.js",       // background service worker
-    content: "./content.js",           // content script
-    options: "./options.js",           // options page logic
+    content: "./content.js",
+    navigator: "./navigator.js",
+    options: "./options.js",
+    cryptoUtils: "./crypto-utils.js",
+    cryptoWorker: "./crypto-worker.js",
   },
+
+  // Output to dist/ folder with same names
   output: {
     path: path.resolve(__dirname, "dist"),
-    filename: "[name].bundle.js",      // generates navigator.bundle.js, etc.
-    clean: true,
+    filename: "[name].js",
   },
-  resolve: {
-    extensions: [".js", ".json"],
-  },
+
+  // Babel loader for JS transpiling
   module: {
     rules: [
       {
         test: /\.js$/,
         exclude: /node_modules/,
-        use: {
-          loader: "babel-loader",
-          options: {
-            presets: [["@babel/preset-env", { targets: "defaults" }]],
-          },
-        },
+        use: "babel-loader",
       },
     ],
   },
-  optimization: {
-    minimize: false, // keep readable for debugging if needed
-  },
+
+  // Production mode for minification and optimization
+  mode: "production",
 };
