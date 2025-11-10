@@ -546,3 +546,24 @@ async function runNavigator() {
 // === Start
 // ============================================
 runNavigator();
+
+// Let orchestrator know extension is alive
+(async () => {
+  try {
+    await loadConfig();
+    console.log("dataExtracted:ready"); // 👈 Puppeteer waits for this
+  } catch (err) {
+    console.error("[OTMenT] ⚠️ Config load failed:", err);
+  }
+})();
+
+// Listen for orchestration start from Puppeteer
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.action === "startNavigator") {
+    console.log("[OTMenT] 🧭 Received startNavigator — beginning main loop...");
+    runNavigator()
+      .then(() => console.log("[OTMenT] ✅ Navigation run complete."))
+      .catch(err => console.error("[OTMenT] ❌ Navigator error:", err));
+    sendResponse({ status: "started" });
+  }
+});
