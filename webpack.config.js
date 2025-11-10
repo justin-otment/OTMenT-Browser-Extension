@@ -1,6 +1,6 @@
-const path = require("path");
+import path from "path";
 
-module.exports = {
+export default {
   // Multiple entry points for your scripts
   entry: {
     content: "./content.js",
@@ -12,7 +12,7 @@ module.exports = {
 
   // Output to dist/ folder with same names
   output: {
-    path: path.resolve(__dirname, "dist"),
+    path: path.resolve("./dist"),
     filename: "[name].js",
   },
 
@@ -29,4 +29,4 @@ module.exports = {
 
   // Production mode for minification and optimization
   mode: "production",
-}; 
+};
