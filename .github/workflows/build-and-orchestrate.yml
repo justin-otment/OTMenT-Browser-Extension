@@ -49,8 +49,8 @@ jobs:
       - name: 🤖 Run Puppeteer orchestrator (headful with Xvfb)
         run: xvfb-run -a node puppeteer-orchestrator.js
         env:
-          EXTENSION_PATH: ./dist
-          CONFIG_PATH: ./config.json
+          EXTENSION_PATH: ${{ github.workspace }}/dist
+          CONFIG_PATH: ${{ github.workspace }}/config.json
           CHROME_PATH: /usr/bin/google-chrome
 
       # 9️⃣ Package built extension + orchestrator artifacts
