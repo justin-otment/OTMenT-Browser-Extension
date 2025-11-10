@@ -41,7 +41,7 @@ jobs:
       - name: 🏗️ Build extension
         run: npx webpack --config webpack.config.js --mode production --stats-error-details
 
-      # 7️⃣ Create artifacts folders for orchestrator
+      # 7️⃣ Prepare artifacts folders
       - name: 📁 Prepare artifacts folders
         run: mkdir -p artifacts/screenshots artifacts/diagnostics
 
@@ -49,9 +49,17 @@ jobs:
       - name: 🤖 Run Puppeteer orchestrator (headful with Xvfb)
         run: xvfb-run -a node puppeteer-orchestrator.js
         env:
-          EXTENSION_PATH: ./dist
-          CONFIG_PATH: ./config.json
+          EXTENSION_PATH: ${{ github.workspace }}/dist
+          CONFIG_PATH: ${{ github.workspace }}/config.json
           CHROME_PATH: /usr/bin/google-chrome
+          MAX_RUNTIME_MS: 180000
+          SCREENSHOT_INTERVAL_MS: 3000
+
+      # ✅ NEW: Ensure screenshots exist before zipping
+      - name: 🔍 Verify screenshot directory
+        run: |
+          echo "Checking screenshot output..."
+          ls -l artifacts/screenshots || echo "⚠️ No screenshots found!"
 
       # 9️⃣ Package built extension + orchestrator artifacts
       - name: 📦 Package extension and artifacts
@@ -67,10 +75,19 @@ jobs:
             service-account.json \
             artifacts/screenshots \
             artifacts/diagnostics
+        working-directory: ${{ github.workspace }}
 
-      # 🔟 Upload ZIP artifact
-      - name: 📤 Upload build + orchestrator artifact
+      # 🔟 Upload ZIP artifact (build + screenshots)
+      - name: 📤 Upload full ZIP package
         uses: actions/upload-artifact@v4
         with:
           name: OTMenT_build_${{ github.run_number }}
           path: release/OTMenT_build_${{ github.run_number }}.zip
+
+      # 🖼️ NEW: Upload screenshots as a separate artifact (easy access)
+      - name: 📤 Upload screenshots folder
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots_${{ github.run_number }}
+          path: artifacts/screenshots
