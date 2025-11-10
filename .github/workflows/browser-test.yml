@@ -1,6 +1,6 @@
 name: Browser tests (non-headless)
 
-on: [push, pull_request]
+on: [pull_request]
 
 permissions:
   contents: read
