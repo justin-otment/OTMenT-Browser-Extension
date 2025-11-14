@@ -5,7 +5,7 @@ const path = require('path');
 const MAX_RETRIES = 3;
 let retries = 0;
 
-// Main orchestrator function to activate the extension and switch to Tab #2
+// Main orchestrator function to activate the extension
 const runOrchestrator = async () => {
   try {
     const browser = await puppeteer.launch({
@@ -18,29 +18,17 @@ const runOrchestrator = async () => {
       ],
     });
 
-    const pages = await browser.pages(); // Get all opened pages/tabs
-    const firstTab = pages[0];
-    const secondTab = pages[1];
+    const page = await browser.newPage();
 
-    // If there's no second tab open, open a new tab
-    if (!secondTab) {
-      console.log("No second tab found, opening a new one...");
-      secondTab = await browser.newPage();
-    }
+    // Wait for the extension to load and confirm it's active (e.g., by checking the extension UI)
+    await page.waitForSelector('#extension-ui', { timeout: 60000 }); // Adjust selector for your extension's UI
 
-    // Activate the extension in the first tab
-    await firstTab.waitForSelector('#extension-ui', { timeout: 60000 }); // Replace with your actual extension UI selector
     console.log('Extension activated and UI loaded successfully!');
 
     // Optionally take a screenshot to confirm the extension is working
-    await firstTab.screenshot({ path: 'artifacts/screenshots/extension-activated.png' });
+    await page.screenshot({ path: 'artifacts/screenshots/extension-activated.png' });
 
-    // Switch to Tab #2
-    await switchToTab(secondTab);
-    console.log('Switched to Tab #2 successfully!');
-
-    // Optionally take a screenshot of the second tab
-    await secondTab.screenshot({ path: 'artifacts/screenshots/tab-2.png' });
+    // You can add any other checks or actions here (e.g., interact with the extension's UI)
 
     await browser.close();
     console.log('Puppeteer orchestrator complete!');
@@ -54,15 +42,6 @@ const runOrchestrator = async () => {
       console.error('Max retries reached. Orchestrator failed.');
       process.exit(1); // Exit with failure
     }
-  }
-};
-
-// Function to switch to a specific tab
-const switchToTab = async (tab) => {
-  try {
-    await tab.bringToFront(); // Bring the second tab to the front
-  } catch (error) {
-    console.error('Error switching to Tab #2:', error);
   }
 };
 
