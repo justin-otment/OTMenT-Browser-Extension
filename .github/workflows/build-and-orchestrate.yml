@@ -55,19 +55,25 @@ jobs:
           MAX_RUNTIME_MS: 180000
           SCREENSHOT_INTERVAL_MS: 3000
 
-      # ✅ NEW: Ensure screenshots exist before zipping
+      # 9️⃣ Verify screenshots folder exists
       - name: 🔍 Verify screenshot directory
         run: |
           echo "Checking screenshot output..."
-          ls -l artifacts/screenshots || echo "⚠️ No screenshots found!"
+          if [ -d "artifacts/screenshots" ] && [ "$(ls -A artifacts/screenshots)" ]; then
+            echo "✅ Screenshots exist."
+          else
+            echo "⚠️ No screenshots found!"
+          fi
 
-      # 9️⃣ Package built extension + orchestrator artifacts
+      # 🔟 Package built extension + artifacts
       - name: 📦 Package extension and artifacts
         run: |
           mkdir -p release
           zip -r release/OTMenT_build_${{ github.run_number }}.zip \
             dist \
             manifest.json \
+            navigator.js \
+            content.js \
             options.html \
             jquery-3.7.1.min.js \
             config.json \
@@ -77,15 +83,15 @@ jobs:
             artifacts/diagnostics
         working-directory: ${{ github.workspace }}
 
-      # 🔟 Upload ZIP artifact (build + screenshots)
+      # 1️⃣1️⃣ Upload ZIP artifact (build + screenshots)
       - name: 📤 Upload full ZIP package
         uses: actions/upload-artifact@v4
         with:
           name: OTMenT_build_${{ github.run_number }}
           path: release/OTMenT_build_${{ github.run_number }}.zip
 
-      # 🖼️ NEW: Upload screenshots as a separate artifact (easy access)
-      - name: 📤 Upload screenshots folder
+      # 1️⃣2️⃣ Upload screenshots as separate artifact for easy access
+      - name: 🖼️ Upload screenshots folder
         if: always()
         uses: actions/upload-artifact@v4
         with:
