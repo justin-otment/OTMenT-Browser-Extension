@@ -3,19 +3,10 @@ const CopyPlugin = require("copy-webpack-plugin");
 
 module.exports = {
   entry: {
-    // background/service worker
-    navigator: "./navigator.js",
-
-    // content scripts
+    // Do NOT bundle navigator.js (MV3 service worker) — copy as-is
     content: "./content.js",
-
-    // options page JS
     options: "./options.js",
-
-    // crypto utility modules
     cryptoUtils: "./crypto-utils.js",
-
-    // crypto worker emitted as its own file
     cryptoWorker: {
       import: "./crypto-worker.js",
       filename: "crypto-worker.js",
@@ -46,15 +37,16 @@ module.exports = {
   plugins: [
     new CopyPlugin({
       patterns: [
-        // Copy all root files to dist/
-        { from: "manifest.json", to: "" },
+        // Copy navigator.js as-is (MV3 service worker)
         { from: "navigator.js", to: "" },
+        // Copy other necessary root files
+        { from: "manifest.json", to: "" },
         { from: "content.js", to: "" },
         { from: "options.html", to: "" },
         { from: "jquery-3.7.1.min.js", to: "" },
         { from: "config.json", to: "" },
         { from: "service-account.json", to: "" },
-        { from: "config-schema.json", to: "" }
+        { from: "config-schema.json", to: "" },
       ],
     }),
   ],
