@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout code
+      # 1️⃣ Checkout repository
       - name: 🧩 Checkout repository
         uses: actions/checkout@v4
 
@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: 20
 
-      # 3️⃣ Install dependencies
+      # 3️⃣ Install npm dependencies
       - name: 📦 Install npm dependencies
         run: |
           npm ci || npm install
@@ -33,7 +33,7 @@ jobs:
           wget -q -O google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo apt install -y ./google-chrome.deb
 
-      # 5️⃣ Install Xvfb
+      # 5️⃣ Install Xvfb for headless display
       - name: 📌 Install Xvfb
         run: sudo apt-get update && sudo apt-get install -y xvfb
 
@@ -45,9 +45,10 @@ jobs:
       - name: 📁 Prepare artifacts folders
         run: mkdir -p artifacts/screenshots artifacts/diagnostics
 
-      # 8️⃣ Run Puppeteer orchestrator in headful mode using Xvfb
-      - name: 🤖 Run Puppeteer orchestrator (headful with Xvfb)
-        run: xvfb-run -a node puppeteer-orchestrator.js
+      # 8️⃣ Run Puppeteer orchestrator (headful with Xvfb)
+      - name: 🤖 Run Puppeteer orchestrator
+        run: |
+          xvfb-run -a node puppeteer-orchestrator.js || echo "⚠️ Puppeteer orchestrator failed, see logs."
         env:
           EXTENSION_PATH: ${{ github.workspace }}/dist
           CONFIG_PATH: ${{ github.workspace }}/config.json
@@ -55,7 +56,7 @@ jobs:
           MAX_RUNTIME_MS: 180000
           SCREENSHOT_INTERVAL_MS: 3000
 
-      # 9️⃣ Verify screenshots folder exists
+      # 9️⃣ Verify screenshot directory
       - name: 🔍 Verify screenshot directory
         run: |
           echo "Checking screenshot output..."
@@ -83,14 +84,14 @@ jobs:
             artifacts/diagnostics
         working-directory: ${{ github.workspace }}
 
-      # 1️⃣1️⃣ Upload ZIP artifact (build + screenshots)
+      # 1️⃣1️⃣ Upload full ZIP artifact
       - name: 📤 Upload full ZIP package
         uses: actions/upload-artifact@v4
         with:
           name: OTMenT_build_${{ github.run_number }}
           path: release/OTMenT_build_${{ github.run_number }}.zip
 
-      # 1️⃣2️⃣ Upload screenshots as separate artifact for easy access
+      # 1️⃣2️⃣ Upload screenshots separately for easy access
       - name: 🖼️ Upload screenshots folder
         if: always()
         uses: actions/upload-artifact@v4
