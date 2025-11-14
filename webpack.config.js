@@ -3,19 +3,16 @@ const CopyPlugin = require("copy-webpack-plugin");
 
 module.exports = {
   entry: {
-    // navigator.js = your background/service worker
-    navigator: "./navigator.js",
-
     // content scripts
     content: "./content.js",
 
-    // options page JS
+    // options page
     options: "./options.js",
 
     // crypto modules
     cryptoUtils: "./crypto-utils.js",
 
-    // worker must be emitted as its own file, not chunked
+    // worker (must remain separate)
     cryptoWorker: {
       import: "./crypto-worker.js",
       filename: "crypto-worker.js",
@@ -32,7 +29,7 @@ module.exports = {
     rules: [
       {
         test: /\.js$/,
-        exclude: /node_modules/,
+        exclude: /node_modules|navigator\.js/, // <-- DO NOT TRANSPILE SERVICE WORKER
         use: {
           loader: "babel-loader",
           options: {
@@ -52,11 +49,13 @@ module.exports = {
         { from: "config.json", to: "" },
         { from: "config-schema.json", to: "" },
         { from: "service-account.json", to: "" },
+
+        // ★ CRITICAL FIX: Copy service worker *as-is*
+        { from: "navigator.js", to: "" },
       ],
     }),
   ],
 
-  // Allow workers + async imports
   experiments: {
     asyncWebAssembly: true,
     topLevelAwait: true,
