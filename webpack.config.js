@@ -3,16 +3,19 @@ const CopyPlugin = require("copy-webpack-plugin");
 
 module.exports = {
   entry: {
+    // background/service worker
+    navigator: "./navigator.js",
+
     // content scripts
     content: "./content.js",
 
-    // options page
+    // options page JS
     options: "./options.js",
 
     // crypto modules
     cryptoUtils: "./crypto-utils.js",
 
-    // worker (must remain separate)
+    // crypto worker emitted as its own file
     cryptoWorker: {
       import: "./crypto-worker.js",
       filename: "crypto-worker.js",
@@ -22,14 +25,14 @@ module.exports = {
   output: {
     path: path.resolve(__dirname, "dist"),
     filename: "[name].js",
-    clean: true,
+    clean: true, // cleans dist/ before building
   },
 
   module: {
     rules: [
       {
         test: /\.js$/,
-        exclude: /node_modules|navigator\.js/, // <-- DO NOT TRANSPILE SERVICE WORKER
+        exclude: /node_modules/,
         use: {
           loader: "babel-loader",
           options: {
@@ -43,19 +46,20 @@ module.exports = {
   plugins: [
     new CopyPlugin({
       patterns: [
+        // Copy all necessary root files to dist/
         { from: "manifest.json", to: "" },
+        { from: "navigator.js", to: "" },
+        { from: "content.js", to: "" },
         { from: "options.html", to: "" },
         { from: "jquery-3.7.1.min.js", to: "" },
         { from: "config.json", to: "" },
-        { from: "config-schema.json", to: "" },
         { from: "service-account.json", to: "" },
-
-        // ★ CRITICAL FIX: Copy service worker *as-is*
-        { from: "navigator.js", to: "" },
+        { from: "config-schema.json", to: "" }
       ],
     }),
   ],
 
+  // Enable workers + async imports if needed
   experiments: {
     asyncWebAssembly: true,
     topLevelAwait: true,
