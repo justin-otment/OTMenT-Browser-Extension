@@ -1,5 +1,5 @@
 // ===================================================
-// === OTMenT v3 — content.js (Hybrid Extractor v5.1)
+// === OTMenT v3 — content.js (Hybrid Extractor v5.2)
 // ===================================================
 console.log("[OTMenT] Content script loaded (jQuery active)");
 
@@ -90,6 +90,20 @@ console.log("[OTMenT] Content script loaded (jQuery active)");
     }
 
     // ===================================================
+    // === PAGE TITLE CHALLENGE CHECK (pre-extraction)
+    // ===================================================
+    const titleText = document.title.trim();
+    if (/attention|just a moment/i.test(titleText)) {
+      console.warn("[OTMenT] Challenge page detected ('" + titleText + "') — pausing extraction.");
+      chrome.runtime.sendMessage({
+        action: "dataError",
+        error: "Challenge page detected (" + titleText + ")",
+        page: location.href,
+      });
+      return; // stop extraction entirely for this run
+    }
+
+    // ===================================================
     // === PAGE CLASSIFICATION (Enhanced Detection)
     // ===================================================
     let isDetail = false;
@@ -127,7 +141,6 @@ console.log("[OTMenT] Content script loaded (jQuery active)");
     } catch (err) {
       console.warn("[OTMenT] Selector classification error:", err.message);
     }
-
 
     // ===================================================
     // === SINGLE-SITEMAP MODE
@@ -248,7 +261,6 @@ console.log("[OTMenT] Content script loaded (jQuery active)");
 
       return;
     }
-
 
     // ===================================================
     // === UNKNOWN PAGE TYPE
