@@ -1,76 +1,110 @@
-const puppeteer = require('puppeteer-core');
-const path = require('path');
+const puppeteer = require("puppeteer-core");
+const path = require("path");
+const fs = require("fs");
 
-// Retry settings
+const EXTENSION_PATH = process.env.EXTENSION_PATH || path.join(__dirname, "dist");
+const CHROME_PATH = process.env.CHROME_PATH || "/usr/bin/google-chrome";
+const MAX_RUNTIME_MS = Number(process.env.MAX_RUNTIME_MS || 180000);
+const SCREENSHOT_INTERVAL_MS = Number(process.env.SCREENSHOT_INTERVAL_MS || 3000);
+
 const MAX_RETRIES = 3;
 let retries = 0;
 
-// Main orchestrator function to activate the extension
-const runOrchestrator = async () => {
+// Ensure paths
+if (!fs.existsSync(EXTENSION_PATH)) {
+  console.error("❌ Extension folder does NOT exist:", EXTENSION_PATH);
+  process.exit(1);
+}
+
+// Continuous screenshot logger
+async function startScreenshotLoop(page) {
+  let counter = 0;
+  const interval = setInterval(async () => {
+    try {
+      const file = `artifacts/screenshots/live_${String(counter).padStart(4, "0")}.png`;
+      await page.screenshot({ path: file });
+      counter++;
+    } catch (err) {
+      console.error("Screenshot loop error:", err.message);
+    }
+  }, SCREENSHOT_INTERVAL_MS);
+
+  return interval;
+}
+
+async function waitForServiceWorker(browser, timeout = 20000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const workers = await browser.waitForTarget(
+      target =>
+        target.type() === "service_worker" &&
+        target.url().includes("navigator.js"),
+      { timeout: 1000 }
+    ).catch(() => null);
+
+    if (workers) return true;
+    await new Promise(res => setTimeout(res, 500));
+  }
+  return false;
+}
+
+async function runOrchestrator() {
   try {
-    const EXTENSION_PATH = process.env.EXTENSION_PATH || path.join(__dirname, 'dist');
+    console.log("🚀 Launching Chrome with extension:", EXTENSION_PATH);
 
     const browser = await puppeteer.launch({
-      headless: false, // Must be headful for extension UI
-      executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome',
+      headless: false,
+      executablePath: CHROME_PATH,
       args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        `--disable-extensions-except=${EXTENSION_PATH}`,
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
         `--load-extension=${EXTENSION_PATH}`,
+        `--disable-extensions-except=${EXTENSION_PATH}`,
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding"
       ],
+      defaultViewport: null,
     });
 
-    // --- Detect extension ID ---
-    const targets = await browser.targets();
-    const extensionTarget = targets.find(t => t.type() === 'background_page');
+    const page = await browser.newPage();
 
-    if (!extensionTarget) {
-      throw new Error("Extension background page not found. Extension did NOT load.");
+    // Logging screenshots
+    const screenshotTimer = await startScreenshotLoop(page);
+
+    console.log("⏳ Waiting for service worker (navigator.js) to register…");
+
+    const swOk = await waitForServiceWorker(browser);
+    if (!swOk) {
+      throw new Error("Extension MV3 service worker (navigator.js) did NOT load.");
     }
 
-    const extensionUrl = extensionTarget.url(); // e.g. chrome-extension://abcd1234/_generated_background_page.html
-    const extensionId = extensionUrl.split('/')[2];
+    console.log("✅ Service worker detected! Extension loaded successfully.");
 
-    if (!extensionId) {
-      throw new Error("Failed to extract extension ID.");
-    }
-
-    console.log("Detected extension ID:", extensionId);
-
-    // --- Open the extension’s UI page ---
-    const uiPage = await browser.newPage();
-    const uiUrl = `chrome-extension://${extensionId}/index.html`;
-
-    console.log("Opening extension UI:", uiUrl);
-
-    await uiPage.goto(uiUrl, { waitUntil: 'networkidle0', timeout: 60000 });
-
-    // Wait for your UI root element to show up
-    await uiPage.waitForSelector('#extension-ui', { timeout: 60000 });
-
-    console.log('Extension activated and UI loaded successfully!');
-
-    // Screenshot confirmation
-    await uiPage.screenshot({
-      path: 'artifacts/screenshots/extension-activated.png'
+    // Take confirmation screenshot
+    await page.goto("https://example.com");
+    await page.screenshot({
+      path: "artifacts/screenshots/extension_loaded.png",
     });
 
+    // Stop screenshot loop
+    clearInterval(screenshotTimer);
+
+    console.log("🎉 Orchestrator completed successfully.");
     await browser.close();
-    console.log('Puppeteer orchestrator complete!');
+
   } catch (error) {
-    console.error('Error during puppeteer orchestrator:', error);
+    console.error("❌ Error during puppeteer orchestrator:", error);
 
     if (retries < MAX_RETRIES) {
       retries++;
-      console.log(`Retrying... (${retries}/${MAX_RETRIES})`);
-      await runOrchestrator();
-    } else {
-      console.error('Max retries reached. Orchestrator failed.');
-      process.exit(1);
+      console.log(`🔁 Retrying… (${retries}/${MAX_RETRIES})`);
+      return await runOrchestrator();
     }
-  }
-};
 
-// Run the orchestrator
+    console.error("💥 Max retries reached. Orchestrator failed.");
+    process.exit(1);
+  }
+}
+
 runOrchestrator();
