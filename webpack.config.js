@@ -1,27 +1,48 @@
-import path from "path";
-import CopyPlugin from "copy-webpack-plugin";
+const path = require("path");
+const CopyPlugin = require("copy-webpack-plugin");
 
-export default {
+module.exports = {
   entry: {
-    content: "./content.js",
+    // navigator.js = your background/service worker
     navigator: "./navigator.js",
+
+    // content scripts
+    content: "./content.js",
+
+    // options page JS
     options: "./options.js",
+
+    // crypto modules
     cryptoUtils: "./crypto-utils.js",
-    cryptoWorker: "./crypto-worker.js",
+
+    // worker must be emitted as its own file, not chunked
+    cryptoWorker: {
+      import: "./crypto-worker.js",
+      filename: "crypto-worker.js",
+    },
   },
+
   output: {
-    path: path.resolve("./dist"),
+    path: path.resolve(__dirname, "dist"),
     filename: "[name].js",
+    clean: true,
   },
+
   module: {
     rules: [
       {
         test: /\.js$/,
         exclude: /node_modules/,
-        use: "babel-loader",
+        use: {
+          loader: "babel-loader",
+          options: {
+            presets: [["@babel/preset-env", { targets: { chrome: "120" } }]],
+          },
+        },
       },
     ],
   },
+
   plugins: [
     new CopyPlugin({
       patterns: [
@@ -34,5 +55,13 @@ export default {
       ],
     }),
   ],
+
+  // Allow workers + async imports
+  experiments: {
+    asyncWebAssembly: true,
+    topLevelAwait: true,
+  },
+
   mode: "production",
+  devtool: false,
 };
