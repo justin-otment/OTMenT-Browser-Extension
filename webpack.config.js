@@ -12,7 +12,7 @@ module.exports = {
     // options page JS
     options: "./options.js",
 
-    // crypto modules
+    // crypto utility modules
     cryptoUtils: "./crypto-utils.js",
 
     // crypto worker emitted as its own file
@@ -25,7 +25,7 @@ module.exports = {
   output: {
     path: path.resolve(__dirname, "dist"),
     filename: "[name].js",
-    clean: true, // cleans dist/ before building
+    clean: true, // clean dist/ before building
   },
 
   module: {
@@ -46,7 +46,7 @@ module.exports = {
   plugins: [
     new CopyPlugin({
       patterns: [
-        // Copy all necessary root files to dist/
+        // Copy all root files to dist/
         { from: "manifest.json", to: "" },
         { from: "navigator.js", to: "" },
         { from: "content.js", to: "" },
