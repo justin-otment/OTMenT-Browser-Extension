@@ -8,39 +8,66 @@ let retries = 0;
 // Main orchestrator function to activate the extension
 const runOrchestrator = async () => {
   try {
+    const EXTENSION_PATH = process.env.EXTENSION_PATH || path.join(__dirname, 'dist');
+
     const browser = await puppeteer.launch({
-      headless: false, // Run in headful mode to allow UI interactions
-      executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome', // Path to Chrome
+      headless: false, // Must be headful for extension UI
+      executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        `--load-extension=${path.join(__dirname, 'dist')}`, // Point to your dist folder
+        `--disable-extensions-except=${EXTENSION_PATH}`,
+        `--load-extension=${EXTENSION_PATH}`,
       ],
     });
 
-    const page = await browser.newPage();
+    // --- Detect extension ID ---
+    const targets = await browser.targets();
+    const extensionTarget = targets.find(t => t.type() === 'background_page');
 
-    // Wait for the extension to load and confirm it's active (e.g., by checking the extension UI)
-    await page.waitForSelector('#extension-ui', { timeout: 60000 }); // Adjust selector for your extension's UI
+    if (!extensionTarget) {
+      throw new Error("Extension background page not found. Extension did NOT load.");
+    }
+
+    const extensionUrl = extensionTarget.url(); // e.g. chrome-extension://abcd1234/_generated_background_page.html
+    const extensionId = extensionUrl.split('/')[2];
+
+    if (!extensionId) {
+      throw new Error("Failed to extract extension ID.");
+    }
+
+    console.log("Detected extension ID:", extensionId);
+
+    // --- Open the extension’s UI page ---
+    const uiPage = await browser.newPage();
+    const uiUrl = `chrome-extension://${extensionId}/index.html`;
+
+    console.log("Opening extension UI:", uiUrl);
+
+    await uiPage.goto(uiUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+
+    // Wait for your UI root element to show up
+    await uiPage.waitForSelector('#extension-ui', { timeout: 60000 });
 
     console.log('Extension activated and UI loaded successfully!');
 
-    // Optionally take a screenshot to confirm the extension is working
-    await page.screenshot({ path: 'artifacts/screenshots/extension-activated.png' });
-
-    // You can add any other checks or actions here (e.g., interact with the extension's UI)
+    // Screenshot confirmation
+    await uiPage.screenshot({
+      path: 'artifacts/screenshots/extension-activated.png'
+    });
 
     await browser.close();
     console.log('Puppeteer orchestrator complete!');
   } catch (error) {
     console.error('Error during puppeteer orchestrator:', error);
+
     if (retries < MAX_RETRIES) {
       retries++;
       console.log(`Retrying... (${retries}/${MAX_RETRIES})`);
-      await runOrchestrator(); // Retry orchestrator
+      await runOrchestrator();
     } else {
       console.error('Max retries reached. Orchestrator failed.');
-      process.exit(1); // Exit with failure
+      process.exit(1);
     }
   }
 };
