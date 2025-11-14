@@ -1,110 +1,67 @@
-const puppeteer = require("puppeteer-core");
-const path = require("path");
-const fs = require("fs");
-
-const EXTENSION_PATH = process.env.EXTENSION_PATH || path.join(__dirname, "dist");
-const CHROME_PATH = process.env.CHROME_PATH || "/usr/bin/google-chrome";
-const MAX_RUNTIME_MS = Number(process.env.MAX_RUNTIME_MS || 180000);
-const SCREENSHOT_INTERVAL_MS = Number(process.env.SCREENSHOT_INTERVAL_MS || 3000);
+const puppeteer = require('puppeteer-core');
+const path = require('path');
 
 const MAX_RETRIES = 3;
 let retries = 0;
 
-// Ensure paths
-if (!fs.existsSync(EXTENSION_PATH)) {
-  console.error("❌ Extension folder does NOT exist:", EXTENSION_PATH);
-  process.exit(1);
-}
-
-// Continuous screenshot logger
-async function startScreenshotLoop(page) {
-  let counter = 0;
-  const interval = setInterval(async () => {
-    try {
-      const file = `artifacts/screenshots/live_${String(counter).padStart(4, "0")}.png`;
-      await page.screenshot({ path: file });
-      counter++;
-    } catch (err) {
-      console.error("Screenshot loop error:", err.message);
-    }
-  }, SCREENSHOT_INTERVAL_MS);
-
-  return interval;
-}
-
-async function waitForServiceWorker(browser, timeout = 20000) {
+// Helper to wait for service worker registration
+async function waitForServiceWorker(browser, workerFile, timeout = 60000) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
-    const workers = await browser.waitForTarget(
-      target =>
-        target.type() === "service_worker" &&
-        target.url().includes("navigator.js"),
-      { timeout: 1000 }
-    ).catch(() => null);
-
-    if (workers) return true;
-    await new Promise(res => setTimeout(res, 500));
+    const targets = await browser.targets();
+    const swTarget = targets.find(
+      t => t.type() === 'service_worker' && t.url().includes(workerFile)
+    );
+    if (swTarget) return swTarget;
+    await new Promise(r => setTimeout(r, 500));
   }
-  return false;
+  return null;
 }
 
-async function runOrchestrator() {
+const runOrchestrator = async () => {
   try {
-    console.log("🚀 Launching Chrome with extension:", EXTENSION_PATH);
-
+    console.log(`🚀 Launching Chrome with extension: ${process.env.EXTENSION_PATH}`);
     const browser = await puppeteer.launch({
-      headless: false,
-      executablePath: CHROME_PATH,
+      headless: false, // must be headful for MV3
+      executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome',
       args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        `--load-extension=${EXTENSION_PATH}`,
-        `--disable-extensions-except=${EXTENSION_PATH}`,
-        "--disable-background-timer-throttling",
-        "--disable-backgrounding-occluded-windows",
-        "--disable-renderer-backgrounding"
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        `--disable-extensions-except=${process.env.EXTENSION_PATH}`,
+        `--load-extension=${process.env.EXTENSION_PATH}`,
       ],
-      defaultViewport: null,
     });
 
     const page = await browser.newPage();
 
-    // Logging screenshots
-    const screenshotTimer = await startScreenshotLoop(page);
+    // Wait for MV3 service worker (navigator.js) to register
+    console.log('⏳ Waiting for service worker (navigator.js) to register…');
+    const swTarget = await waitForServiceWorker(browser, 'navigator.js', process.env.MAX_RUNTIME_MS || 60000);
 
-    console.log("⏳ Waiting for service worker (navigator.js) to register…");
-
-    const swOk = await waitForServiceWorker(browser);
-    if (!swOk) {
-      throw new Error("Extension MV3 service worker (navigator.js) did NOT load.");
+    if (!swTarget) {
+      throw new Error('Extension MV3 service worker (navigator.js) did NOT load.');
     }
 
-    console.log("✅ Service worker detected! Extension loaded successfully.");
+    console.log('✅ MV3 service worker registered successfully!');
 
-    // Take confirmation screenshot
-    await page.goto("https://example.com");
-    await page.screenshot({
-      path: "artifacts/screenshots/extension_loaded.png",
-    });
+    // Optional: Take a screenshot to confirm extension loaded
+    await page.goto('about:blank'); // or a page your extension can interact with
+    await page.screenshot({ path: 'artifacts/screenshots/extension-activated.png' });
 
-    // Stop screenshot loop
-    clearInterval(screenshotTimer);
-
-    console.log("🎉 Orchestrator completed successfully.");
     await browser.close();
-
+    console.log('🎯 Puppeteer orchestrator complete!');
   } catch (error) {
-    console.error("❌ Error during puppeteer orchestrator:", error);
-
+    console.error('❌ Error during puppeteer orchestrator:', error.message || error);
     if (retries < MAX_RETRIES) {
       retries++;
-      console.log(`🔁 Retrying… (${retries}/${MAX_RETRIES})`);
-      return await runOrchestrator();
+      console.log(`🔁 Retrying... (${retries}/${MAX_RETRIES})`);
+      await runOrchestrator();
+    } else {
+      console.error('💥 Max retries reached. Orchestrator failed.');
+      process.exit(1);
     }
-
-    console.error("💥 Max retries reached. Orchestrator failed.");
-    process.exit(1);
   }
-}
+};
 
+// Run orchestrator
 runOrchestrator();
