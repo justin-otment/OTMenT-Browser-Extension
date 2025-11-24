@@ -1,8 +1,11 @@
 import fs from "fs/promises";
+import path from "path";
 
 export async function loadNodeConfig() {
-  const config = JSON.parse(await fs.readFile("./config.json", "utf8"));
-  const sa     = JSON.parse(await fs.readFile("./service-account.json", "utf8"));
+  const baseDir = path.resolve("./GitHub-Onyot"); // <-- your extension subfolder
+
+  const config = JSON.parse(await fs.readFile(path.join(baseDir, "config.json"), "utf8"));
+  const sa     = JSON.parse(await fs.readFile(path.join(baseDir, "service-account.json"), "utf8"));
 
   return {
     config,
