@@ -1,0 +1,23 @@
+name: OTMenT Automation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decode service account
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS_B64: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+        run: |
+          echo "$GOOGLE_APPLICATION_CREDENTIALS_B64" | base64 --decode > service-account.json
+          ls -l service-account.json
+
+      - name: Install dependencies
+        run: npm install node-fetch
+
+      - name: Run OTMenT automation
+        run: node automation/run.js
