@@ -7,17 +7,25 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
+      # 1️⃣ Checkout repository
       - uses: actions/checkout@v4
 
+      # 2️⃣ Create GitHub-Onyot folder (if not already)
+      - name: Ensure GitHub-Onyot folder exists
+        run: mkdir -p GitHub-Onyot
+
+      # 3️⃣ Decode base64 service account into GitHub-Onyot
       - name: Decode service account
         env:
           GOOGLE_APPLICATION_CREDENTIALS_B64: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
         run: |
-          echo "$GOOGLE_APPLICATION_CREDENTIALS_B64" | base64 --decode > service-account.json
-          ls -l service-account.json
+          echo "$GOOGLE_APPLICATION_CREDENTIALS_B64" | base64 --decode > GitHub-Onyot/service-account.json
+          ls -l GitHub-Onyot/service-account.json
 
+      # 4️⃣ Install Node dependencies
       - name: Install dependencies
         run: npm install node-fetch
 
+      # 5️⃣ Run OTMenT automation (reads files from GitHub-Onyot)
       - name: Run OTMenT automation
         run: node automation/run.js
