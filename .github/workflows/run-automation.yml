@@ -1,0 +1,66 @@
+name: Run OTMenT Firefox Automation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-addon:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1️⃣ Checkout repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2️⃣ Install Node.js & dependencies
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install Node dependencies
+        run: |
+          echo "Installing Node dependencies..."
+          npm install puppeteer-firefox node-fetch jsonwebtoken
+          echo "Dependencies installed successfully."
+
+      # 3️⃣ Decode service account and prepare config
+      - name: Prepare service account & sheet config
+        run: |
+          echo "Creating secrets directory..."
+          mkdir -p automation/secrets
+
+          echo "Decoding service account..."
+          cat service-account_base64.txt | base64 --decode > automation/secrets/service-account.json
+          echo "Service account written to automation/secrets/service-account.json"
+
+          echo "Writing sheet config..."
+          cat <<EOF > automation/secrets/config.json
+          {
+            "spreadsheetId": "${{ secrets.SHEET_ID }}",
+            "sheetName": "${{ secrets.SHEET_NAME }}",
+            "detailSheetName": "${{ secrets.DETAIL_SHEET }}"
+          }
+          EOF
+
+          echo "Validating JSON config..."
+          jq . automation/secrets/config.json
+
+      # 4️⃣ Run automation script
+      - name: Run Firefox automation
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          ADDON_ID: ${{ secrets.ADDON_ID }}   # e.g. otm-enterprises-v1
+        run: |
+          echo "Starting automation..."
+          node automation/run.js || { echo "Automation failed"; exit 1; }
+          echo "Automation completed successfully."
+
+      # 5️⃣ Cleanup
+      - name: Cleanup secrets
+        if: always()
+        run: |
+          echo "Cleaning up secrets..."
+          rm -rf automation/secrets
+          echo "Secrets cleaned up."
