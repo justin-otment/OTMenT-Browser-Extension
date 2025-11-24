@@ -12,33 +12,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Install Node dependencies
-      - name: Install Node.js & dependencies
+      # 2️⃣ Install Node.js & dependencies
+      - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: 20
-      - run: npm install puppeteer-firefox node-fetch jsonwebtoken
 
-      # 3️⃣ Set environment variables from secrets
-      - name: Set secrets
-        env:
-          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
-          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
-          ADDON_ID: ${{ secrets.ADDON_ID }}
-          GOOGLE_APPLICATION_CREDENTIALS_B64: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-          SHEET_NAME: ${{ secrets.SHEET_NAME }}
-          DETAIL_SHEET: ${{ secrets.DETAIL_SHEET }}
+      - name: Install Node dependencies
+        run: npm install puppeteer-firefox node-fetch jsonwebtoken
+
+      # 3️⃣ Decode service account and prepare config
+      - name: Prepare service account & sheet config
         run: |
-          echo "$GOOGLE_APPLICATION_CREDENTIALS_B64" | base64 --decode > automation/secrets/service-account.json
           mkdir -p automation/secrets
-          echo "{ \"spreadsheetId\": \"$SHEET_ID\", \"sheetName\": \"$SHEET_NAME\", \"detailSheetName\": \"$DETAIL_SHEET\" }" > automation/secrets/config.json
-          echo "Secrets decoded and config prepared"
-
-      # 4️⃣ Launch the Node automation script
-      - name: Run Node.js automation
-        env:
-          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
-          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
-          ADDON_ID: ${{ secrets.ADDON_ID }}
-        run: node automation/run.js
+          cat service-account_base64.txt | base64 --decode > automation/secrets/service-account.json
+          echo "{ \"spreadsheetId\": \"${{ secrets.SHEET_ID }}\", \"sheetName\": \"${{ secrets.SHEET_NAME }}\", \"detailSheetName\": \"${{ secrets.DETAIL_SHEET }}
