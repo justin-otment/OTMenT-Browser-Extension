@@ -48,6 +48,10 @@ jobs:
 
       # 4️⃣ Run automation script
       - name: Run Firefox automation
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          ADDON_ID: ${{ secrets.ADDON_ID }}   # e.g. otm-enterprises-v1
         run: |
           echo "Starting automation..."
           node automation/run.js || { echo "Automation failed"; exit 1; }
