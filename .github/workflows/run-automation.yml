@@ -46,21 +46,21 @@ jobs:
           echo "Validating JSON config..."
           jq . automation/secrets/config.json
 
-      # 4️⃣ Run automation script
+      # 4️⃣ Run automation script with local extension
       - name: Run Firefox automation
         env:
-          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
-          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
-          ADDON_ID: ${{ secrets.ADDON_ID }}   # e.g. otm-enterprises-v1
+          EXTENSION_PATH: extension-source.zip
         run: |
           echo "Starting automation..."
+          unzip -q "$EXTENSION_PATH" -d extension-unpacked
+          export EXTENSION_PATH=extension-unpacked
           node automation/run.js || { echo "Automation failed"; exit 1; }
           echo "Automation completed successfully."
 
       # 5️⃣ Cleanup
-      - name: Cleanup secrets
+      - name: Cleanup secrets and temp files
         if: always()
         run: |
-          echo "Cleaning up secrets..."
-          rm -rf automation/secrets
-          echo "Secrets cleaned up."
+          echo "Cleaning up secrets and temp files..."
+          rm -rf automation/secrets extension-unpacked
+          echo "Cleanup complete."
