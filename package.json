@@ -1,14 +1,13 @@
 {
   "name": "otment-browser-extension",
   "version": "1.0.0",
-  "description": "Automation workflow for running Firefox with OTMenT extension",
   "type": "module",
   "main": "automation/run.js",
   "scripts": {
     "start": "node automation/run.js"
   },
   "dependencies": {
-    "puppeteer-firefox": "^0.5.0",
+    "puppeteer": "^22.0.0",
     "node-fetch": "^3.3.2",
     "jsonwebtoken": "^9.0.2"
   },
