@@ -21,10 +21,17 @@ jobs:
       - name: Install Node dependencies
         run: |
           echo "Installing Node dependencies..."
-          npm install puppeteer-firefox node-fetch jsonwebtoken
+          npm install puppeteer node-fetch jsonwebtoken
           echo "Dependencies installed successfully."
 
-      # 3️⃣ Decode service account and prepare config
+      # 3️⃣ Install Firefox for Puppeteer
+      - name: Install Firefox for Puppeteer
+        run: |
+          echo "Installing Firefox for Puppeteer..."
+          npx puppeteer browsers install firefox
+          echo "Firefox installed successfully."
+
+      # 4️⃣ Decode service account and prepare config
       - name: Prepare service account & sheet config
         run: |
           echo "Creating secrets directory..."
@@ -46,7 +53,7 @@ jobs:
           echo "Validating JSON config..."
           jq . automation/secrets/config.json
 
-      # 4️⃣ Run automation script with local extension
+      # 5️⃣ Run automation script with local extension
       - name: Run Firefox automation
         env:
           EXTENSION_PATH: extension-source.zip
@@ -57,7 +64,7 @@ jobs:
           node automation/run.js || { echo "Automation failed"; exit 1; }
           echo "Automation completed successfully."
 
-      # 5️⃣ Cleanup
+      # 6️⃣ Cleanup
       - name: Cleanup secrets and temp files
         if: always()
         run: |
