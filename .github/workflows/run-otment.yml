@@ -10,7 +10,7 @@ jobs:
       # 1️⃣ Checkout repository
       - uses: actions/checkout@v4
 
-      # 2️⃣ Create GitHub-Onyot folder (if not already)
+      # 2️⃣ Ensure GitHub-Onyot folder exists
       - name: Ensure GitHub-Onyot folder exists
         run: mkdir -p GitHub-Onyot
 
@@ -24,8 +24,19 @@ jobs:
 
       # 4️⃣ Install Node dependencies
       - name: Install dependencies
-        run: npm install node-fetch
+        run: |
+          npm install node-fetch
 
-      # 5️⃣ Run OTMenT automation (reads files from GitHub-Onyot)
+      # 5️⃣ Add "type": "module" to package.json if missing (eliminate ES module warning)
+      - name: Ensure package.json has type module
+        run: |
+          node -e "
+          const fs = require('fs');
+          const pkgPath = './package.json';
+          const pkg = JSON.parse(fs.readFileSync(pkgPath));
+          if (!pkg.type) { pkg.type = 'module'; fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2)); }
+          "
+
+      # 6️⃣ Run OTMenT automation (reads files from GitHub-Onyot)
       - name: Run OTMenT automation
         run: node automation/run.js
