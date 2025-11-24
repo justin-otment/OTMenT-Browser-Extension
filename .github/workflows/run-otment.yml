@@ -1,42 +1,44 @@
-name: OTMenT Automation
+name: Run OTMenT Firefox Automation
 
 on:
   workflow_dispatch:
 
 jobs:
-  run:
+  run-addon:
     runs-on: ubuntu-latest
+
     steps:
-      # 1️⃣ Checkout repository
-      - uses: actions/checkout@v4
+      # 1️⃣ Checkout repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      # 2️⃣ Ensure GitHub-Onyot folder exists
-      - name: Ensure GitHub-Onyot folder exists
-        run: mkdir -p GitHub-Onyot
+      # 2️⃣ Install Node dependencies
+      - name: Install Node.js & dependencies
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+      - run: npm install puppeteer-firefox node-fetch jsonwebtoken
 
-      # 3️⃣ Decode base64 service account into GitHub-Onyot
-      - name: Decode service account
+      # 3️⃣ Set environment variables from secrets
+      - name: Set secrets
         env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          ADDON_ID: ${{ secrets.ADDON_ID }}
           GOOGLE_APPLICATION_CREDENTIALS_B64: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SHEET_NAME: ${{ secrets.SHEET_NAME }}
+          DETAIL_SHEET: ${{ secrets.DETAIL_SHEET }}
         run: |
-          echo "$GOOGLE_APPLICATION_CREDENTIALS_B64" | base64 --decode > GitHub-Onyot/service-account.json
-          ls -l GitHub-Onyot/service-account.json
+          echo "$GOOGLE_APPLICATION_CREDENTIALS_B64" | base64 --decode > automation/secrets/service-account.json
+          mkdir -p automation/secrets
+          echo "{ \"spreadsheetId\": \"$SHEET_ID\", \"sheetName\": \"$SHEET_NAME\", \"detailSheetName\": \"$DETAIL_SHEET\" }" > automation/secrets/config.json
+          echo "Secrets decoded and config prepared"
 
-      # 4️⃣ Install Node dependencies
-      - name: Install dependencies
-        run: |
-          npm install node-fetch
-
-      # 5️⃣ Add "type": "module" to package.json if missing (eliminate ES module warning)
-      - name: Ensure package.json has type module
-        run: |
-          node -e "
-          const fs = require('fs');
-          const pkgPath = './package.json';
-          const pkg = JSON.parse(fs.readFileSync(pkgPath));
-          if (!pkg.type) { pkg.type = 'module'; fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2)); }
-          "
-
-      # 6️⃣ Run OTMenT automation (reads files from GitHub-Onyot)
-      - name: Run OTMenT automation
+      # 4️⃣ Launch the Node automation script
+      - name: Run Node.js automation
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          ADDON_ID: ${{ secrets.ADDON_ID }}
         run: node automation/run.js
