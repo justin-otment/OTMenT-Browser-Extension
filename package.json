@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "OTMenT Automation Extension + Puppeteer Orchestrator",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "build": "webpack --config webpack.config.cjs --mode production",
     "orchestrate": "node puppeteer-orchestrator.js",
@@ -36,3 +37,4 @@
     "copy-webpack-plugin": "^12.0.2"
   }
 }
+w
