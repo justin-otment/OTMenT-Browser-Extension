@@ -1,0 +1,23 @@
+name: Extract XPI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  unzip:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Unzip XPI
+        run: |
+          mkdir extension
+          unzip otm_enterprises_v1-2.8.xpi -d extension
+          ls -R extension
+
+      - name: Upload extracted source
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-source
+          path: extension
