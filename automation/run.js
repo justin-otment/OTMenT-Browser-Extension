@@ -1,8 +1,6 @@
-import puppeteerFirefox from "puppeteer-firefox"; 
+import puppeteer from "puppeteer";
 import fs from "fs/promises";
 import path from "path";
-
-const { firefox } = puppeteerFirefox;
 
 // ---------------------------------------------
 // 1. Load Extension From Local Path (NO AMO)
@@ -16,22 +14,27 @@ async function launchWithLocalExtension() {
 
   console.log("[OTMenT] Using local extension:", EXTENSION_PATH);
 
+  // Resolve absolute path
+  const resolvedPath = path.resolve(EXTENSION_PATH);
+
   // Launch Firefox with unsigned extension support
-  const browser = await firefox.launch({
+  const browser = await puppeteer.launch({
+    product: "firefox",
     headless: false,
-    extraPrefsFirefox: {
-      "xpinstall.signatures.required": false,   // allow unsigned addons
-    }
+    args: [
+      `--disable-extensions-except=${resolvedPath}`,
+      `--load-extension=${resolvedPath}`
+    ],
+    ignoreDefaultArgs: ["--disable-extensions"],
   });
 
-  // Install the extension (folder or .xpi)
-  await browser.installAddon(EXTENSION_PATH, { temporary: true });
-  console.log("[OTMenT] Extension successfully installed!");
+  console.log("[OTMenT] Browser launched.");
 
   const page = await browser.newPage();
   await page.goto("https://example.com");
 
   console.log("[OTMenT] Firefox launched with extension!");
+  console.log("[OTMenT] Page title:", await page.title());
 
   await browser.close();
   console.log("[OTMenT] Browser closed.");
