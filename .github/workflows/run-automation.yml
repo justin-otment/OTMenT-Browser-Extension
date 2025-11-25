@@ -26,7 +26,19 @@ jobs:
           pip install undetected-chromedriver selenium
           echo "Dependencies installed successfully."
 
-      # 4️⃣ Prepare service account & sheet config
+      # 4️⃣ Install Google Chrome + Xvfb
+      - name: Install Chrome and Xvfb
+        run: |
+          echo "Installing Google Chrome and Xvfb..."
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg xvfb
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+          echo "Chrome installed at /usr/bin/google-chrome"
+
+      # 5️⃣ Prepare service account & sheet config
       - name: Prepare service account & sheet config
         run: |
           echo "Creating secrets directory..."
@@ -48,19 +60,22 @@ jobs:
           echo "Validating JSON config..."
           jq . automation/secrets/config.json
 
-      # 5️⃣ Run Chrome automation with uc driver
+      # 6️⃣ Run Chrome automation with uc driver (non-headless via Xvfb)
       - name: Run Chrome automation with uc driver
         env:
           EXTENSION_PATH: GitHub-Onyot
-          DEBUG: "false"
+          DEBUG: "true"   # force non-headless
           GOOGLE_USER: ${{ secrets.GOOGLE_USER }}
           GOOGLE_PASS: ${{ secrets.GOOGLE_PASS }}
         run: |
           echo "Starting automation..."
-          python automation/run.py || { echo "Automation failed"; exit 1; }
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x1024x24 &
+          sleep 3
+          python automation/run.py > chrome.log 2>&1 || { echo "Automation failed"; exit 1; }
           echo "Automation completed successfully."
 
-      # 6️⃣ Upload screenshot artifact
+      # 7️⃣ Upload screenshot artifact
       - name: Upload screenshot artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -69,7 +84,16 @@ jobs:
           path: automation-screenshot.png
           if-no-files-found: ignore
 
-      # 7️⃣ Cleanup
+      # 8️⃣ Upload Chrome logs artifact
+      - name: Upload Chrome logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-logs
+          path: chrome.log
+          if-no-files-found: ignore
+
+      # 9️⃣ Cleanup
       - name: Cleanup
         if: always()
         run: |
