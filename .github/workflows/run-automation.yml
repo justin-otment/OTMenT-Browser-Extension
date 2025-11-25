@@ -29,7 +29,7 @@ jobs:
         run: |
           echo "Installing Firefox via apt..."
           sudo apt-get update
-          sudo apt-get install -y firefox
+          sudo apt-get install -y firefox xvfb
           echo "Firefox installed successfully at /usr/bin/firefox"
 
       # 4️⃣ Decode service account and prepare config
@@ -54,15 +54,19 @@ jobs:
           echo "Validating JSON config..."
           jq . automation/secrets/config.json
 
-      # 5️⃣ Run automation script with local extension (GitHub-Onyot folder)
+      # 5️⃣ Run automation script with local extension (GitHub-Onyot folder) under Xvfb
       - name: Run Firefox automation
         env:
           EXTENSION_PATH: GitHub-Onyot
           FIREFOX_PATH: /usr/bin/firefox
+          DEBUG: "false"
         run: |
           echo "Starting automation..."
           export EXTENSION_PATH=GitHub-Onyot
           export FIREFOX_PATH=/usr/bin/firefox
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x1024x24 &
+          sleep 3
           node automation/run.js || { echo "Automation failed"; exit 1; }
           echo "Automation completed successfully."
 
