@@ -24,12 +24,18 @@ jobs:
           npm install puppeteer node-fetch jsonwebtoken
           echo "Dependencies installed successfully."
 
-      # 3️⃣ Install Firefox for Puppeteer
+      # 3️⃣ Hybrid Firefox install (stable first, fallback to apt)
       - name: Install Firefox for Puppeteer
         run: |
-          echo "Installing Firefox for Puppeteer..."
-          npx puppeteer browsers install firefox
-          echo "Firefox installed successfully."
+          echo "Installing Firefox for Puppeteer (stable)..."
+          if npx puppeteer browsers install firefox@stable; then
+            echo "Firefox (stable) installed successfully."
+          else
+            echo "⚠️ Puppeteer Firefox install failed, falling back to apt..."
+            sudo apt-get update
+            sudo apt-get install -y firefox
+            echo "System Firefox installed successfully."
+          fi
 
       # 4️⃣ Decode service account and prepare config
       - name: Prepare service account & sheet config
