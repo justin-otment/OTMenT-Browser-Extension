@@ -1,28 +1,31 @@
-name: Run OTMenT Browser Automation
+name: OTMenT Browser Automation
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-otment:
+  otment:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Install Node dependencies
-        run: |
-          npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
+      - name: Install Puppeteer
+        run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
 
       - name: Run OTMenT Automation
         env:
-          EXTENSION_PATH: dist   # <-- CHANGE to your extension folder
-          GOOGLE_EMAIL: ${{ secrets.GOOGLE_EMAIL }}
-          GOOGLE_PASSWORD: ${{ secrets.GOOGLE_PASSWORD }}
+          EXTENSION_PATH: dist    # <-- update if extension folder changes
+          GOOGLE_USER: ${{ secrets.GOOGLE_USER }}
+          GOOGLE_PASS: ${{ secrets.GOOGLE_PASS }}
         run: node automation/run.js
+
+      - name: Upload screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: otment-screenshot
+          path: post-login.png
