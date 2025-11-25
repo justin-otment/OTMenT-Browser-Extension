@@ -8,22 +8,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1️⃣ Checkout repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2️⃣ Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # 3️⃣ Install Python dependencies
       - name: Install Python dependencies
         run: |
+          echo "Installing Python dependencies..."
+          pip install --upgrade pip
           pip install undetected-chromedriver selenium
+          echo "Dependencies installed successfully."
 
+      # 4️⃣ Prepare service account & sheet config
       - name: Prepare service account & sheet config
         run: |
+          echo "Creating secrets directory..."
           mkdir -p automation/secrets
+
+          echo "Decoding service account..."
           cat service-account_base64.txt | base64 --decode > automation/secrets/service-account.json
+          echo "Service account written to automation/secrets/service-account.json"
+
+          echo "Writing sheet config..."
           cat <<EOF > automation/secrets/config.json
           {
             "spreadsheetId": "${{ secrets.SHEET_ID }}",
@@ -31,17 +44,24 @@ jobs:
             "detailSheetName": "${{ secrets.DETAIL_SHEET }}"
           }
           EOF
+
+          echo "Validating JSON config..."
           jq . automation/secrets/config.json
 
+      # 5️⃣ Run Chrome automation with uc driver
       - name: Run Chrome automation with uc driver
         env:
           EXTENSION_PATH: GitHub-Onyot
           DEBUG: "false"
         run: |
+          echo "Starting automation..."
           python automation/run.py || { echo "Automation failed"; exit 1; }
           echo "Automation completed successfully."
 
+      # 6️⃣ Cleanup
       - name: Cleanup
         if: always()
         run: |
+          echo "Cleaning up secrets and temp files..."
           rm -rf automation/secrets
+          echo "Cleanup complete."
