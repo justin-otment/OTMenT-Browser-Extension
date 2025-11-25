@@ -1,4 +1,4 @@
-name: Run OTMenT Chrome Automation
+name: Run OTMenT Sheets Automation
 
 on:
   workflow_dispatch:
@@ -23,35 +23,17 @@ jobs:
         run: |
           echo "Installing Python dependencies..."
           pip install --upgrade pip
-          pip install --upgrade undetected-chromedriver selenium
+          pip install google-auth google-auth-oauthlib gspread
           echo "Dependencies installed successfully."
 
-      # 4️⃣ Install Google Chrome + Xvfb
-      - name: Install Chrome and Xvfb
-        run: |
-          echo "Installing Google Chrome and Xvfb..."
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg xvfb
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-          echo "Chrome installed at /usr/bin/google-chrome"
-
-      # 5️⃣ Verify Chrome install
-      - name: Verify Chrome install
-        run: |
-          which google-chrome || echo "Chrome binary not found!"
-          google-chrome --version || echo "Chrome version not available"
-
-      # 6️⃣ Prepare service account & sheet config
+      # 4️⃣ Prepare service account & sheet config
       - name: Prepare service account & sheet config
         run: |
           echo "Creating secrets directory..."
           mkdir -p automation/secrets
 
           echo "Decoding service account..."
-          cat service-account_base64.txt | base64 --decode > automation/secrets/service-account.json
+          base64 --decode service-account_base64.txt > automation/secrets/service-account.json
           echo "Service account written to automation/secrets/service-account.json"
 
           echo "Writing sheet config..."
@@ -66,44 +48,24 @@ jobs:
           echo "Validating JSON config..."
           jq . automation/secrets/config.json
 
-      # 7️⃣ Run Chrome automation with uc driver (non-headless via Xvfb)
-      - name: Run Chrome automation with uc driver
-        env:
-          EXTENSION_PATH: GitHub-Onyot
-          DEBUG: "true"   # force non-headless
-          GOOGLE_USER: ${{ secrets.GOOGLE_USER }}
-          GOOGLE_PASS: ${{ secrets.GOOGLE_PASS }}
-          CHROME_BIN: "/usr/bin/google-chrome"
-          CI: "true"
+      # 5️⃣ Run Sheets automation using service account
+      - name: Run Sheets automation
         run: |
-          echo "Starting automation..."
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 1280x1024x24 &
-          sleep 3
-          # Always create an empty log file so artifact upload succeeds
-          touch chrome.log
-          python automation/run.py >> chrome.log 2>&1 || echo "Automation failed"
-          echo "Automation step finished (success or failure)."
+          echo "Starting Sheets automation..."
+          touch sheets.log
+          python automation/sheets_run.py >> sheets.log 2>&1 || echo "Automation failed"
+          echo "Sheets automation step finished (success or failure)."
 
-      # 8️⃣ Upload screenshot artifact
-      - name: Upload screenshot artifact
+      # 6️⃣ Upload Sheets logs artifact
+      - name: Upload Sheets logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: automation-screenshot
-          path: automation-screenshot.png
-          if-no-files-found: ignore
-
-      # 9️⃣ Upload Chrome logs artifact
-      - name: Upload Chrome logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: chrome-logs
-          path: chrome.log
+          name: sheets-logs
+          path: sheets.log
           if-no-files-found: warn
 
-      # 🔟 Cleanup
+      # 7️⃣ Cleanup
       - name: Cleanup
         if: always()
         run: |
