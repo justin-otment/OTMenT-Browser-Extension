@@ -1,108 +1,104 @@
-import undetected_chromedriver as uc
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-import os
-import sys
-import time
+name: Run OTMenT Chrome Automation
 
-def launch_with_local_extension():
-    EXTENSION_PATH = os.environ.get("EXTENSION_PATH")
-    DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
-    GOOGLE_USER = os.environ.get("GOOGLE_USER")
-    GOOGLE_PASS = os.environ.get("GOOGLE_PASS")
+on:
+  workflow_dispatch:
 
-    if not EXTENSION_PATH:
-        raise RuntimeError("EXTENSION_PATH environment variable is missing!")
-    if not GOOGLE_USER or not GOOGLE_PASS:
-        raise RuntimeError("GOOGLE_USER and GOOGLE_PASS environment variables are required!")
+jobs:
+  run-addon:
+    runs-on: ubuntu-latest
 
-    print("[OTMenT] Using local extension:", EXTENSION_PATH)
-    print("[OTMenT] Debug mode:", "ON (non‑headless)" if DEBUG else "OFF (still non‑headless)")
+    steps:
+      # 1️⃣ Checkout repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    options = Options()
+      # 2️⃣ Setup Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    # Load extension: .crx packaged or unpacked folder
-    if EXTENSION_PATH.endswith(".crx"):
-        options.add_extension(EXTENSION_PATH)
-    else:
-        options.add_argument(f"--load-extension={EXTENSION_PATH}")
+      # 3️⃣ Install Python dependencies
+      - name: Install Python dependencies
+        run: |
+          echo "Installing Python dependencies..."
+          pip install --upgrade pip
+          pip install undetected-chromedriver selenium
+          echo "Dependencies installed successfully."
 
-    # Force non‑headless mode always
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
+      # 4️⃣ Install Google Chrome + Xvfb
+      - name: Install Chrome and Xvfb
+        run: |
+          echo "Installing Google Chrome and Xvfb..."
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg xvfb
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+          echo "Chrome installed at /usr/bin/google-chrome"
 
-    driver = None
-    screenshot_path = "automation-screenshot.png"
+      # 5️⃣ Prepare service account & sheet config
+      - name: Prepare service account & sheet config
+        run: |
+          echo "Creating secrets directory..."
+          mkdir -p automation/secrets
 
-    try:
-        # Explicitly point to Chrome binary installed in CI
-        driver = uc.Chrome(
-            options=options,
-            browser_executable_path="/usr/bin/google-chrome"
-        )
+          echo "Decoding service account..."
+          cat service-account_base64.txt | base64 --decode > automation/secrets/service-account.json
+          echo "Service account written to automation/secrets/service-account.json"
 
-        # Navigate to Google login
-        driver.get("https://accounts.google.com/")
-        print("[OTMenT] Navigated to Google Sign‑In")
+          echo "Writing sheet config..."
+          cat <<EOF > automation/secrets/config.json
+          {
+            "spreadsheetId": "${{ secrets.SHEET_ID }}",
+            "sheetName": "${{ secrets.SHEET_NAME }}",
+            "detailSheetName": "${{ secrets.DETAIL_SHEET }}"
+          }
+          EOF
 
-        wait = WebDriverWait(driver, 20)
+          echo "Validating JSON config..."
+          jq . automation/secrets/config.json
 
-        # Enter email
-        email_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="email"]')))
-        email_input.send_keys(GOOGLE_USER)
-        driver.find_element(By.ID, "identifierNext").click()
-        print("[OTMenT] Entered email")
+      # 6️⃣ Run Chrome automation with uc driver (non-headless via Xvfb)
+      - name: Run Chrome automation with uc driver
+        env:
+          EXTENSION_PATH: GitHub-Onyot
+          DEBUG: "true"   # force non-headless
+          GOOGLE_USER: ${{ secrets.GOOGLE_USER }}
+          GOOGLE_PASS: ${{ secrets.GOOGLE_PASS }}
+          CHROME_BIN: "/usr/bin/google-chrome"
+          CI: "true"
+        run: |
+          echo "Starting automation..."
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x1024x24 &
+          sleep 3
+          python automation/run.py > chrome.log 2>&1 || { echo "Automation failed"; exit 1; }
+          echo "Automation completed successfully."
 
-        # Enter password
-        password_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="password"]')))
-        password_input.send_keys(GOOGLE_PASS)
-        driver.find_element(By.ID, "passwordNext").click()
-        print("[OTMenT] Entered password")
+      # 7️⃣ Upload screenshot artifact
+      - name: Upload screenshot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: automation-screenshot
+          path: automation-screenshot.png
+          if-no-files-found: ignore
 
-        # Wait for login to complete
-        wait.until(EC.title_contains("Google"))
-        print("[OTMenT] Logged into Google account successfully")
+      # 8️⃣ Upload Chrome logs artifact
+      - name: Upload Chrome logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-logs
+          path: chrome.log
+          if-no-files-found: ignore
 
-        # Optional: navigate to target URL after login
-        target_url = "https://www.peoplesearchnow.com/address/629-west-lightwood-street_citrus-springs-fl"
-        driver.get(target_url)
-        print("[OTMenT] Navigated to target URL")
-        print("[OTMenT] Page title:", driver.title)
-
-        driver.save_screenshot(screenshot_path)
-        print(f"[OTMenT] Screenshot captured at {screenshot_path}")
-
-        # Keep browser open for inspection if DEBUG=true
-        if DEBUG:
-            print("[OTMenT] Debug mode active — keeping browser open for manual inspection.")
-            time.sleep(60)  # keep window open for 1 minute
-
-    except TimeoutException as te:
-        print("[OTMenT] Timeout while loading page:", te)
-        try:
-            if driver:
-                driver.save_screenshot(screenshot_path)
-                print(f"[OTMenT] Timeout screenshot captured at {screenshot_path}")
-        except Exception:
-            print("[OTMenT] Could not capture screenshot on timeout.")
-        sys.exit(1)
-    except Exception as e:
-        print("[OTMenT] Automation failed:", e)
-        try:
-            if driver:
-                driver.save_screenshot(screenshot_path)
-                print(f"[OTMenT] Error screenshot captured at {screenshot_path}")
-        except Exception:
-            print("[OTMenT] Could not capture screenshot on error.")
-        sys.exit(1)
-    finally:
-        if driver:
-            driver.quit()
-            print("[OTMenT] Browser closed.")
-
-if __name__ == "__main__":
-    launch_with_local_extension()
+      # 9️⃣ Cleanup
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up secrets and temp files..."
+          rm -rf automation/secrets
+          echo "Cleanup complete."
