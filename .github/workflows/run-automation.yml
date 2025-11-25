@@ -1,48 +1,28 @@
-name: Run OTMenT Sheets Automation
+name: Run OTMenT Browser Automation
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-addon:
+  run-otment:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: "3.11"
+          node-version: "20"
 
-      - name: Install Python dependencies
+      - name: Install Node dependencies
         run: |
-          pip install --upgrade pip
-          pip install google-auth google-auth-oauthlib gspread
+          npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
 
-      - name: Prepare service account
-        run: |
-          mkdir -p automation/secrets
-          base64 --decode service-account_base64.txt > automation/secrets/service-account.json
-
-      - name: Run Sheets automation
+      - name: Run OTMenT Automation
         env:
-          EXTENSION_PATH: GitHub-Onyot
-        run: |
-          echo "Starting Sheets automation..."
-          touch sheets.log
-          python automation/run.py >> sheets.log 2>&1 || echo "Automation failed"
-          echo "Sheets automation step finished."
-
-      - name: Upload Sheets logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sheets-logs
-          path: sheets.log
-          if-no-files-found: warn
-
-      - name: Cleanup
-        if: always()
-        run: rm -rf automation/secrets
+          EXTENSION_PATH: dist   # <-- CHANGE to your extension folder
+          GOOGLE_EMAIL: ${{ secrets.GOOGLE_EMAIL }}
+          GOOGLE_PASSWORD: ${{ secrets.GOOGLE_PASSWORD }}
+        run: node automation/run.js
