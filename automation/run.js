@@ -1,6 +1,7 @@
 import undetected_chromedriver as uc
 from selenium.webdriver.chrome.options import Options
 import os
+import sys
 
 def launch_with_local_extension():
     EXTENSION_PATH = os.environ.get("EXTENSION_PATH")
@@ -14,17 +15,28 @@ def launch_with_local_extension():
 
     options = Options()
 
-    # Load unpacked extension folder
+    # Load unpacked extension folder or CRX
     if EXTENSION_PATH.endswith(".crx"):
-        options.add_extension(EXTENSION_PATH)
+        if os.path.exists(EXTENSION_PATH):
+            options.add_extension(EXTENSION_PATH)
+        else:
+            raise FileNotFoundError(f"Extension file not found: {EXTENSION_PATH}")
     else:
-        options.add_argument(f"--load-extension={EXTENSION_PATH}")
+        resolved_path = os.path.abspath(EXTENSION_PATH)
+        if os.path.exists(resolved_path):
+            options.add_argument(f"--load-extension={resolved_path}")
+        else:
+            raise FileNotFoundError(f"Extension folder not found: {resolved_path}")
 
     # Headless mode: extensions usually require a visible browser
     if not DEBUG:
-        # uc headless mode is experimental; better to keep visible
+        # uc headless mode is experimental; use new headless flag
         options.add_argument("--headless=new")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
 
+    # Launch browser
     driver = uc.Chrome(options=options)
 
     try:
@@ -33,8 +45,9 @@ def launch_with_local_extension():
         print("[OTMenT] Page title:", driver.title)
 
         # Optional: screenshot for CI debugging
-        driver.save_screenshot("automation-screenshot.png")
-        print("[OTMenT] Screenshot captured.")
+        screenshot_path = "automation-screenshot.png"
+        driver.save_screenshot(screenshot_path)
+        print(f"[OTMenT] Screenshot captured at {screenshot_path}")
     finally:
         driver.quit()
         print("[OTMenT] Browser closed.")
@@ -44,4 +57,4 @@ if __name__ == "__main__":
         launch_with_local_extension()
     except Exception as e:
         print("[OTMenT] Automation failed:", e)
-        exit(1)
+        sys.exit(1)
