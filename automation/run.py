@@ -31,14 +31,19 @@ def launch_with_local_extension():
         options.add_argument(f"--load-extension={EXTENSION_PATH}")
 
     # Force non‑headless mode always
-    # (remove headless flags entirely)
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
 
     driver = None
+    screenshot_path = "automation-screenshot.png"
+
     try:
-        driver = uc.Chrome(options=options)
+        # Explicitly point to Chrome binary installed in CI
+        driver = uc.Chrome(
+            options=options,
+            browser_executable_path="/usr/bin/google-chrome"
+        )
 
         # Navigate to Google login
         driver.get("https://accounts.google.com/")
@@ -68,7 +73,6 @@ def launch_with_local_extension():
         print("[OTMenT] Navigated to target URL")
         print("[OTMenT] Page title:", driver.title)
 
-        screenshot_path = "automation-screenshot.png"
         driver.save_screenshot(screenshot_path)
         print(f"[OTMenT] Screenshot captured at {screenshot_path}")
 
@@ -79,9 +83,21 @@ def launch_with_local_extension():
 
     except TimeoutException as te:
         print("[OTMenT] Timeout while loading page:", te)
+        try:
+            if driver:
+                driver.save_screenshot(screenshot_path)
+                print(f"[OTMenT] Timeout screenshot captured at {screenshot_path}")
+        except Exception:
+            print("[OTMenT] Could not capture screenshot on timeout.")
         sys.exit(1)
     except Exception as e:
         print("[OTMenT] Automation failed:", e)
+        try:
+            if driver:
+                driver.save_screenshot(screenshot_path)
+                print(f"[OTMenT] Error screenshot captured at {screenshot_path}")
+        except Exception:
+            print("[OTMenT] Could not capture screenshot on error.")
         sys.exit(1)
     finally:
         if driver:
