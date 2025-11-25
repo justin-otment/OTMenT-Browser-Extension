@@ -59,14 +59,13 @@ jobs:
           echo "Validating JSON config..."
           jq . automation/secrets/config.json
 
-      # 5️⃣ Run automation script with local extension
+      # 5️⃣ Run automation script with local extension (GitHub-Onyot folder)
       - name: Run Firefox automation
         env:
-          EXTENSION_PATH: extension-source.zip
+          EXTENSION_PATH: GitHub-Onyot
         run: |
           echo "Starting automation..."
-          unzip -q "$EXTENSION_PATH" -d extension-unpacked
-          export EXTENSION_PATH=extension-unpacked
+          export EXTENSION_PATH=GitHub-Onyot
           node automation/run.js || { echo "Automation failed"; exit 1; }
           echo "Automation completed successfully."
 
@@ -75,5 +74,5 @@ jobs:
         if: always()
         run: |
           echo "Cleaning up secrets and temp files..."
-          rm -rf automation/secrets extension-unpacked
+          rm -rf automation/secrets
           echo "Cleanup complete."
