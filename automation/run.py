@@ -64,13 +64,18 @@ def launch_with_local_extension():
         wait = WebDriverWait(driver, 40)  # longer timeout
 
         # Enter email
-        email_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="email"]')))
+        email_input = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'input[type="email"]')))
+        driver.execute_script("arguments[0].scrollIntoView(true);", email_input)
         email_input.send_keys(GOOGLE_USER)
         driver.find_element(By.ID, "identifierNext").click()
         print("[OTMenT] Entered email")
 
+        # Allow transition animation
+        time.sleep(2)
+
         # Enter password
-        password_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="password"]')))
+        password_input = wait.until(EC.element_to_be_clickable((By.NAME, "Passwd")))
+        driver.execute_script("arguments[0].scrollIntoView(true);", password_input)
         password_input.send_keys(GOOGLE_PASS)
         driver.find_element(By.ID, "passwordNext").click()
         print("[OTMenT] Entered password")
