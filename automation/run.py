@@ -1,7 +1,9 @@
 import undetected_chromedriver as uc
 from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException
 import os
 import sys
+import time
 
 def launch_with_local_extension():
     EXTENSION_PATH = os.environ.get("EXTENSION_PATH")
@@ -29,17 +31,31 @@ def launch_with_local_extension():
     try:
         driver = uc.Chrome(options=options)
 
-        # ✅ Target URL
         target_url = "https://www.peoplesearchnow.com/address/629-west-lightwood-street_citrus-springs-fl"
         driver.get(target_url)
         print("[OTMenT] Chrome launched with extension!")
-        print("[OTMenT] Page title:", driver.title)
+        print("[OTMenT] Initial page title:", driver.title)
+
+        # Retry loop if Cloudflare challenge appears
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            if driver.title.strip().lower() == "just a moment...":
+                print(f"[OTMenT] Cloudflare challenge detected (attempt {attempt+1}/{max_attempts}). Waiting...")
+                time.sleep(10)  # wait before retry
+                driver.get(target_url)
+            else:
+                break
+
+        print("[OTMenT] Final page title:", driver.title)
 
         # Optional: screenshot for CI debugging
         screenshot_path = "automation-screenshot.png"
         driver.save_screenshot(screenshot_path)
         print(f"[OTMenT] Screenshot captured at {screenshot_path}")
 
+    except TimeoutException as te:
+        print("[OTMenT] Timeout while loading page:", te)
+        sys.exit(1)
     except Exception as e:
         print("[OTMenT] Automation failed:", e)
         sys.exit(1)
