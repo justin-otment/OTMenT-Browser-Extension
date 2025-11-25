@@ -1,40 +1,13 @@
 {
-  "name": "otment-browser-extension",
-  "version": "1.0.0",
-  "description": "Automation scripts and browser extension tooling for OTMenT Firefox workflows",
-  "type": "module",
-  "main": "automation/run.js",
-  "scripts": {
-    "start": "node automation/run.js",
-    "dev": "nodemon automation/run.js",
-    "lint": "eslint .",
-    "test": "echo \"No tests specified\" && exit 0",
-    "format": "prettier --write ."
-  },
-  "dependencies": {
-    "puppeteer": "^22.0.0",
-    "node-fetch": "^3.3.2",
-    "jsonwebtoken": "^9.0.2"
-  },
-  "devDependencies": {
-    "eslint": "^9.0.0",
-    "prettier": "^3.0.0",
-    "nodemon": "^3.0.0"
-  },
-  "engines": {
-    "node": ">=20"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/your-org/otment-browser-extension.git"
-  },
-  "author": "Justin",
-  "license": "MIT",
-  "keywords": [
-    "puppeteer",
-    "firefox",
-    "automation",
-    "extension",
-    "google-sheets"
-  ]
+"name": "otment-automation",
+"version": "1.0.0",
+"private": true,
+"scripts": {
+"start": "node automation/run.js"
+},
+"dependencies": {
+"puppeteer": "^22.0.0",
+"puppeteer-extra": "^3.2.3",
+"puppeteer-extra-plugin-stealth": "^2.11.1"
+}
 }
