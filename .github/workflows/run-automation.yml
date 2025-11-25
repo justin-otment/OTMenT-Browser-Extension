@@ -1,4 +1,4 @@
-name: Run OTMenT Firefox Automation
+name: Run OTMenT Chrome Automation
 
 on:
   workflow_dispatch:
@@ -8,41 +8,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Install Node.js & dependencies
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          node-version: 20
+          python-version: "3.11"
 
-      - name: Install Node dependencies
+      - name: Install Python dependencies
         run: |
-          echo "Installing Node dependencies..."
-          npm install puppeteer node-fetch jsonwebtoken
-          echo "Dependencies installed successfully."
+          pip install undetected-chromedriver selenium
 
-      # 3️⃣ Install Firefox via apt (system binary)
-      - name: Install Firefox
-        run: |
-          echo "Installing Firefox via apt..."
-          sudo apt-get update
-          sudo apt-get install -y firefox xvfb
-          echo "Firefox installed successfully at /usr/bin/firefox"
-
-      # 4️⃣ Decode service account and prepare config
       - name: Prepare service account & sheet config
         run: |
-          echo "Creating secrets directory..."
           mkdir -p automation/secrets
-
-          echo "Decoding service account..."
           cat service-account_base64.txt | base64 --decode > automation/secrets/service-account.json
-          echo "Service account written to automation/secrets/service-account.json"
-
-          echo "Writing sheet config..."
           cat <<EOF > automation/secrets/config.json
           {
             "spreadsheetId": "${{ secrets.SHEET_ID }}",
@@ -50,30 +31,17 @@ jobs:
             "detailSheetName": "${{ secrets.DETAIL_SHEET }}"
           }
           EOF
-
-          echo "Validating JSON config..."
           jq . automation/secrets/config.json
 
-      # 5️⃣ Run automation script with local extension (GitHub-Onyot folder) under Xvfb
-      - name: Run Firefox automation
+      - name: Run Chrome automation with uc driver
         env:
           EXTENSION_PATH: GitHub-Onyot
-          FIREFOX_PATH: /usr/bin/firefox
           DEBUG: "false"
         run: |
-          echo "Starting automation..."
-          export EXTENSION_PATH=GitHub-Onyot
-          export FIREFOX_PATH=/usr/bin/firefox
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 1280x1024x24 &
-          sleep 3
-          node automation/run.js || { echo "Automation failed"; exit 1; }
+          python automation/run.py || { echo "Automation failed"; exit 1; }
           echo "Automation completed successfully."
 
-      # 6️⃣ Cleanup
-      - name: Cleanup secrets and temp files
+      - name: Cleanup
         if: always()
         run: |
-          echo "Cleaning up secrets and temp files..."
           rm -rf automation/secrets
-          echo "Cleanup complete."
