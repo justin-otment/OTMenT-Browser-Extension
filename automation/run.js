@@ -19,18 +19,40 @@ async function launchWithLocalExtension() {
 
   const resolvedPath = path.resolve(EXTENSION_PATH);
 
-  const browser = await puppeteer.launch({
-    product: "firefox",
-    executablePath: FIREFOX_PATH,
-    headless: !DEBUG, // ✅ headless in CI, non-headless locally if DEBUG=true
-    args: [
-      `--disable-extensions-except=${resolvedPath}`,
-      `--load-extension=${resolvedPath}`
-    ],
-    ignoreDefaultArgs: ["--disable-extensions"],
-  });
-
-  console.log("[OTMenT] Browser launched.");
+  let browser;
+  try {
+    // Try WebDriver BiDi first
+    browser = await puppeteer.launch({
+      protocol: "webDriverBiDi", // ✅ BiDi protocol
+      product: "firefox",
+      executablePath: FIREFOX_PATH,
+      headless: !DEBUG,
+      args: [
+        `--disable-extensions-except=${resolvedPath}`,
+        `--load-extension=${resolvedPath}`
+      ],
+      ignoreDefaultArgs: ["--disable-extensions"],
+    });
+    console.log("[OTMenT] Browser launched with WebDriver BiDi.");
+  } catch (err) {
+    console.warn("[OTMenT] WebDriver BiDi launch failed, falling back to CDP:", err.message);
+    // Fallback to CDP with extra flags and longer timeout
+    browser = await puppeteer.launch({
+      product: "firefox",
+      executablePath: FIREFOX_PATH,
+      headless: !DEBUG,
+      args: [
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        `--disable-extensions-except=${resolvedPath}`,
+        `--load-extension=${resolvedPath}`
+      ],
+      ignoreDefaultArgs: ["--disable-extensions"],
+      timeout: 60000, // increase launch timeout
+    });
+    console.log("[OTMenT] Browser launched with CDP fallback.");
+  }
 
   const page = await browser.newPage();
   await page.goto("https://example.com");
