@@ -53,6 +53,8 @@ jobs:
         env:
           EXTENSION_PATH: GitHub-Onyot
           DEBUG: "false"
+          GOOGLE_USER: ${{ secrets.GOOGLE_USER }}
+          GOOGLE_PASS: ${{ secrets.GOOGLE_PASS }}
         run: |
           echo "Starting automation..."
           python automation/run.py || { echo "Automation failed"; exit 1; }
