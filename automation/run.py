@@ -23,14 +23,15 @@ def launch_with_local_extension():
 
     # Headless mode: extensions usually require a visible browser
     if not DEBUG:
-        # uc headless mode is experimental; better to keep visible
         options.add_argument("--headless=new")
 
     driver = None
     try:
         driver = uc.Chrome(options=options)
 
-        driver.get("https://example.com")
+        # ✅ Target URL
+        target_url = "https://www.peoplesearchnow.com/address/629-west-lightwood-street_citrus-springs-fl"
+        driver.get(target_url)
         print("[OTMenT] Chrome launched with extension!")
         print("[OTMenT] Page title:", driver.title)
 
