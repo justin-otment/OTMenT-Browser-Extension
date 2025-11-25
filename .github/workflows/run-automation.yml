@@ -53,7 +53,7 @@ jobs:
         run: |
           echo "Starting Sheets automation..."
           touch sheets.log
-          python automation/sheets_run.py >> sheets.log 2>&1 || echo "Automation failed"
+          python automation/run.py >> sheets.log 2>&1 || echo "Automation failed"
           echo "Sheets automation step finished (success or failure)."
 
       # 6️⃣ Upload Sheets logs artifact
