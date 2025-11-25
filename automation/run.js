@@ -1,60 +1,82 @@
-import undetected_chromedriver as uc
-from selenium.webdriver.chrome.options import Options
-import os
-import sys
+import puppeteer from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import fs from "fs";
+import path from "path";
 
-def launch_with_local_extension():
-    EXTENSION_PATH = os.environ.get("EXTENSION_PATH")
-    DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
+puppeteer.use(StealthPlugin());
 
-    if not EXTENSION_PATH:
-        raise RuntimeError("EXTENSION_PATH environment variable is missing!")
+async function launch() {
+  const EXTENSION_PATH = process.env.EXTENSION_PATH;
+  const GOOGLE_USER = process.env.GOOGLE_USER;
+  const GOOGLE_PASS = process.env.GOOGLE_PASS;
 
-    print("[OTMenT] Using local extension:", EXTENSION_PATH)
-    print("[OTMenT] Debug mode:", "ON (headless=False)" if DEBUG else "OFF (headless=True)")
+  if (!EXTENSION_PATH) throw new Error("EXTENSION_PATH env missing!");
+  if (!GOOGLE_USER) throw new Error("GOOGLE_USER secret missing!");
+  if (!GOOGLE_PASS) throw new Error("GOOGLE_PASS secret missing!");
 
-    options = Options()
+  const resolvedPath = path.resolve(EXTENSION_PATH);
 
-    # Load unpacked extension folder or CRX
-    if EXTENSION_PATH.endswith(".crx"):
-        if os.path.exists(EXTENSION_PATH):
-            options.add_extension(EXTENSION_PATH)
-        else:
-            raise FileNotFoundError(f"Extension file not found: {EXTENSION_PATH}")
-    else:
-        resolved_path = os.path.abspath(EXTENSION_PATH)
-        if os.path.exists(resolved_path):
-            options.add_argument(f"--load-extension={resolved_path}")
-        else:
-            raise FileNotFoundError(f"Extension folder not found: {resolved_path}")
+  if (!fs.existsSync(resolvedPath)) {
+    throw new Error(`Extension folder not found: ${resolvedPath}`);
+  }
 
-    # Headless mode: extensions usually require a visible browser
-    if not DEBUG:
-        # uc headless mode is experimental; use new headless flag
-        options.add_argument("--headless=new")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
+  console.log("[OTMenT] Using extension:", resolvedPath);
+  console.log("[OTMenT] Running in NON-HEADLESS mode");
 
-    # Launch browser
-    driver = uc.Chrome(options=options)
+  const args = [
+    `--load-extension=${resolvedPath}`,
+    `--disable-extensions-except=${resolvedPath}`,
+    "--no-sandbox",
+    "--disable-setuid-sandbox"
+  ];
 
-    try:
-        driver.get("https://example.com")
-        print("[OTMenT] Chrome launched with extension!")
-        print("[OTMenT] Page title:", driver.title)
+  // ALWAYS non-headless as requested
+  const browser = await puppeteer.launch({
+    headless: false,
+    args,
+    defaultViewport: null
+  });
 
-        # Optional: screenshot for CI debugging
-        screenshot_path = "automation-screenshot.png"
-        driver.save_screenshot(screenshot_path)
-        print(f"[OTMenT] Screenshot captured at {screenshot_path}")
-    finally:
-        driver.quit()
-        print("[OTMenT] Browser closed.")
+  const page = await browser.newPage();
 
-if __name__ == "__main__":
-    try:
-        launch_with_local_extension()
-    except Exception as e:
-        print("[OTMenT] Automation failed:", e)
-        sys.exit(1)
+  console.log("[OTMenT] Navigating to Google login...");
+
+  await page.goto("https://accounts.google.com/signin", {
+    waitUntil: "networkidle2"
+  });
+
+  // ----------------------------
+  // STEP 1: ENTER EMAIL
+  // ----------------------------
+  await page.type("input[type=email]", GOOGLE_USER, { delay: 40 });
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(3000);
+
+  // ----------------------------
+  // STEP 2: ENTER PASSWORD
+  // ----------------------------
+  await page.type("input[type=password]", GOOGLE_PASS, { delay: 40 });
+  await page.keyboard.press("Enter");
+
+  await page.waitForNavigation({ waitUntil: "networkidle2" });
+
+  console.log("[OTMenT] Google login successful.");
+
+  // ----------------------------------------
+  // OPTIONAL: Take screenshot after login
+  // ----------------------------------------
+  const screenshotPath = "post-login.png";
+  await page.screenshot({ path: screenshotPath });
+  console.log(`[OTMenT] Screenshot saved at ${screenshotPath}`);
+
+  console.log("[OTMenT] Browser will stay open for extension automation.");
+  console.log("[OTMenT] (Use extension background.js / navigator.js normally)");
+
+  // Keep the browser running to allow your extension to continue
+  await new Promise(() => {});
+}
+
+launch().catch(err => {
+  console.error("[OTMenT] Automation failed:", err);
+  process.exit(1);
+});
