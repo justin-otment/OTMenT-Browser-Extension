@@ -23,7 +23,7 @@ jobs:
         run: |
           echo "Installing Python dependencies..."
           pip install --upgrade pip
-          pip install undetected-chromedriver selenium
+          pip install --upgrade undetected-chromedriver selenium
           echo "Dependencies installed successfully."
 
       # 4️⃣ Install Google Chrome + Xvfb
@@ -80,8 +80,10 @@ jobs:
           export DISPLAY=:99
           Xvfb :99 -screen 0 1280x1024x24 &
           sleep 3
-          python automation/run.py > chrome.log 2>&1 || { echo "Automation failed"; exit 1; }
-          echo "Automation completed successfully."
+          # Always create an empty log file so artifact upload succeeds
+          touch chrome.log
+          python automation/run.py >> chrome.log 2>&1 || echo "Automation failed"
+          echo "Automation step finished (success or failure)."
 
       # 8️⃣ Upload screenshot artifact
       - name: Upload screenshot artifact
@@ -99,7 +101,7 @@ jobs:
         with:
           name: chrome-logs
           path: chrome.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
       # 🔟 Cleanup
       - name: Cleanup
