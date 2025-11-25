@@ -1,88 +1,66 @@
 // automation/run.js
-import fs from "fs";
-import path from "path";
-import process from "process";
-import puppeteer from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
 
-async function launch() {
-  const EXTENSION_PATH = process.env.EXTENSION_PATH || "GitHub-Onyot";
-  const GOOGLE_USER = process.env.GOOGLE_USER;
-  const GOOGLE_PASS = process.env.GOOGLE_PASS;
 
-  if (!GOOGLE_USER || !GOOGLE_PASS) {
-    throw new Error("GOOGLE_USER and GOOGLE_PASS environment variables are required!");
-  }
+// try to find extension id
+const extId = await findExtensionId(browser);
+if (!extId) {
+console.warn('[OTMenT] Could not detect extension id automatically.');
+} else {
+console.log('[OTMenT] Detected extension id:', extId);
 
-  const extensionDir = path.resolve(EXTENSION_PATH);
-  if (!fs.existsSync(extensionDir)) {
-    throw new Error(`Extension folder not found: ${extensionDir}`);
-  }
 
-  console.log("[OTMenT] Using extension folder:", extensionDir);
-
-  puppeteer.use(StealthPlugin());
-
-  const browser = await puppeteer.launch({
-    headless: false, // force non-headless
-    args: [
-      `--disable-extensions-except=${extensionDir}`,
-      `--load-extension=${extensionDir}`,
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-    ],
-    defaultViewport: null,
-  });
-
-  const page = await browser.newPage();
-
-  try {
-    console.log("[OTMenT] Navigating to Google Sign-In...");
-    await page.goto("https://accounts.google.com/", { waitUntil: "networkidle2" });
-
-    // Enter email
-    await page.waitForSelector('input[type="email"]', { visible: true });
-    await page.type('input[type="email"]', GOOGLE_USER, { delay: 50 });
-    await page.click("#identifierNext");
-    console.log("[OTMenT] Entered email");
-
-    // Wait for password field
-    await page.waitForTimeout(2000);
-    await page.waitForSelector('input[name="Passwd"]', { visible: true });
-    await page.type('input[name="Passwd"]', GOOGLE_PASS, { delay: 50 });
-    await page.click("#passwordNext");
-    console.log("[OTMenT] Entered password");
-
-    // Wait for login or 2FA
-    try {
-      await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 15000 });
-      console.log("[OTMenT] Logged into Google account successfully");
-    } catch {
-      console.log("[OTMenT] Login may require additional verification (2FA or recovery).");
-    }
-
-    // Navigate to target URL
-    const targetUrl = "https://www.peoplesearchnow.com/address/629-west-lightwood-street_citrus-springs-fl";
-    await page.goto(targetUrl, { waitUntil: "networkidle2" });
-    console.log("[OTMenT] Navigated to target URL");
-    console.log("[OTMenT] Page title:", await page.title());
-
-    await page.screenshot({ path: "automation-screenshot.png" });
-    console.log("[OTMenT] Screenshot captured at automation-screenshot.png");
-
-  } catch (err) {
-    console.error("[OTMenT] Automation failed:", err);
-    await page.screenshot({ path: "automation-screenshot.png" }).catch(() => {});
-    throw err;
-  } finally {
-    await browser.close();
-    console.log("[OTMenT] Browser closed.");
-  }
+// attempt to open popup.html or index.html
+const candidates = ['/popup.html', '/index.html', '/popup/popup.html', '/_generated_background_page.html'];
+let opened = false;
+for (const c of candidates) {
+const url = `chrome-extension://${extId}${c}`;
+try {
+const extPage = await browser.newPage();
+await extPage.goto(url, { waitUntil: 'networkidle2', timeout: 10000 });
+console.log('[OTMenT] Opened extension page:', url);
+// optional: click a start button if present
+try {
+await extPage.waitForSelector('#start-btn, button.start, .start-btn', { timeout: 2000 });
+await extPage.click('#start-btn, button.start, .start-btn');
+console.log('[OTMenT] Clicked start button in extension popup (if present)');
+} catch (e) {
+// no start button — fine
+}
+opened = true;
+break;
+} catch (e) {
+// ignore and try next
+console.log('[OTMenT] candidate not found:', url);
+}
 }
 
-launch().catch(err => {
-  console.error(err);
-  process.exit(1);
+
+if (!opened) console.log('[OTMenT] Could not open a popup page candidate — extension may be background-only');
+}
+
+
+// take screenshot for artifact
+try {
+await page.screenshot({ path: 'post-login.png' });
+console.log('[OTMenT] Saved post-login.png');
+} catch (e) {
+console.warn('[OTMenT] Screenshot failed:', e.message);
+}
+
+
+// also take a quick page screenshot
+try {
+await page.screenshot({ path: 'automation-screenshot.png' });
+} catch (e) {}
+
+
+console.log('[OTMenT] Browser will remain open for extension to run.');
+// keep process alive so the extension background page can run. CI will wait until job timeout or you can close manually.
+await new Promise(() => {});
+}
+
+
+launchWithExtension().catch(err => {
+console.error('[OTMenT] Automation failed:', err);
+process.exit(1);
 });
