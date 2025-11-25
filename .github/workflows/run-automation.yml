@@ -8,55 +8,33 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # 3️⃣ Install Python dependencies
       - name: Install Python dependencies
         run: |
-          echo "Installing Python dependencies..."
           pip install --upgrade pip
           pip install google-auth google-auth-oauthlib gspread
-          echo "Dependencies installed successfully."
 
-      # 4️⃣ Prepare service account & sheet config
-      - name: Prepare service account & sheet config
+      - name: Prepare service account
         run: |
-          echo "Creating secrets directory..."
           mkdir -p automation/secrets
-
-          echo "Decoding service account..."
           base64 --decode service-account_base64.txt > automation/secrets/service-account.json
-          echo "Service account written to automation/secrets/service-account.json"
 
-          echo "Writing sheet config..."
-          cat <<EOF > automation/secrets/config.json
-          {
-            "spreadsheetId": "${{ secrets.SHEET_ID }}",
-            "sheetName": "${{ secrets.SHEET_NAME }}",
-            "detailSheetName": "${{ secrets.DETAIL_SHEET }}"
-          }
-          EOF
-
-          echo "Validating JSON config..."
-          jq . automation/secrets/config.json
-
-      # 5️⃣ Run Sheets automation using service account
       - name: Run Sheets automation
+        env:
+          EXTENSION_PATH: GitHub-Onyot
         run: |
           echo "Starting Sheets automation..."
           touch sheets.log
           python automation/run.py >> sheets.log 2>&1 || echo "Automation failed"
-          echo "Sheets automation step finished (success or failure)."
+          echo "Sheets automation step finished."
 
-      # 6️⃣ Upload Sheets logs artifact
       - name: Upload Sheets logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -65,10 +43,6 @@ jobs:
           path: sheets.log
           if-no-files-found: warn
 
-      # 7️⃣ Cleanup
       - name: Cleanup
         if: always()
-        run: |
-          echo "Cleaning up secrets and temp files..."
-          rm -rf automation/secrets
-          echo "Cleanup complete."
+        run: rm -rf automation/secrets
