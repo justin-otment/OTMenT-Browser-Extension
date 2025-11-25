@@ -1,77 +1,47 @@
-import puppeteer from "puppeteer";
-import path from "path";
+import undetected_chromedriver as uc
+from selenium.webdriver.chrome.options import Options
+import os
 
-// ---------------------------------------------
-// Launch Firefox with local extension
-// ---------------------------------------------
-async function launchWithLocalExtension() {
-  const EXTENSION_PATH = process.env.EXTENSION_PATH;
-  const FIREFOX_PATH = process.env.FIREFOX_PATH || "/usr/bin/firefox";
-  const DEBUG = process.env.DEBUG === "true"; // toggle for local debugging
+def launch_with_local_extension():
+    EXTENSION_PATH = os.environ.get("EXTENSION_PATH")
+    DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
 
-  if (!EXTENSION_PATH) {
-    throw new Error("EXTENSION_PATH environment variable is missing!");
-  }
+    if not EXTENSION_PATH:
+        raise RuntimeError("EXTENSION_PATH environment variable is missing!")
 
-  console.log("[OTMenT] Using local extension:", EXTENSION_PATH);
-  console.log("[OTMenT] Using Firefox binary:", FIREFOX_PATH);
-  console.log("[OTMenT] Debug mode:", DEBUG ? "ON (headless=false)" : "OFF (headless=true)");
+    print("[OTMenT] Using local extension:", EXTENSION_PATH)
+    print("[OTMenT] Debug mode:", "ON (headless=False)" if DEBUG else "OFF (headless=True)")
 
-  const resolvedPath = path.resolve(EXTENSION_PATH);
+    options = Options()
 
-  let browser;
-  try {
-    // Try WebDriver BiDi first
-    browser = await puppeteer.launch({
-      protocol: "webDriverBiDi", // ✅ BiDi protocol
-      product: "firefox",
-      executablePath: FIREFOX_PATH,
-      headless: !DEBUG,
-      args: [
-        `--disable-extensions-except=${resolvedPath}`,
-        `--load-extension=${resolvedPath}`
-      ],
-      ignoreDefaultArgs: ["--disable-extensions"],
-    });
-    console.log("[OTMenT] Browser launched with WebDriver BiDi.");
-  } catch (err) {
-    console.warn("[OTMenT] WebDriver BiDi launch failed, falling back to CDP:", err.message);
-    // Fallback to CDP with extra flags and longer timeout
-    browser = await puppeteer.launch({
-      product: "firefox",
-      executablePath: FIREFOX_PATH,
-      headless: !DEBUG,
-      args: [
-        "--no-sandbox",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        `--disable-extensions-except=${resolvedPath}`,
-        `--load-extension=${resolvedPath}`
-      ],
-      ignoreDefaultArgs: ["--disable-extensions"],
-      timeout: 60000, // increase launch timeout
-    });
-    console.log("[OTMenT] Browser launched with CDP fallback.");
-  }
+    # Load unpacked extension folder
+    if EXTENSION_PATH.endswith(".crx"):
+        options.add_extension(EXTENSION_PATH)
+    else:
+        options.add_argument(f"--load-extension={EXTENSION_PATH}")
 
-  const page = await browser.newPage();
-  await page.goto("https://example.com");
+    # Headless mode: extensions usually require a visible browser
+    if not DEBUG:
+        # uc headless mode is experimental; better to keep visible
+        options.add_argument("--headless=new")
 
-  console.log("[OTMenT] Firefox launched with extension!");
-  console.log("[OTMenT] Page title:", await page.title());
+    driver = uc.Chrome(options=options)
 
-  await browser.close();
-  console.log("[OTMenT] Browser closed.");
-}
+    try:
+        driver.get("https://example.com")
+        print("[OTMenT] Chrome launched with extension!")
+        print("[OTMenT] Page title:", driver.title)
 
-// ---------------------------------------------
-// MAIN
-// ---------------------------------------------
-(async () => {
-  try {
-    await launchWithLocalExtension();
-  } catch (err) {
-    console.error("[OTMenT] Automation failed:", err);
-    process.exit(1);
-  }
-})();
+        # Optional: screenshot for CI debugging
+        driver.save_screenshot("automation-screenshot.png")
+        print("[OTMenT] Screenshot captured.")
+    finally:
+        driver.quit()
+        print("[OTMenT] Browser closed.")
+
+if __name__ == "__main__":
+    try:
+        launch_with_local_extension()
+    except Exception as e:
+        print("[OTMenT] Automation failed:", e)
+        exit(1)
