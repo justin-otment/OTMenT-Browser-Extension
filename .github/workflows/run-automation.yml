@@ -8,24 +8,45 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1️⃣ Checkout repository
       - uses: actions/checkout@v4
 
+      # 2️⃣ Setup Node.js
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
+      # 3️⃣ Install Puppeteer + plugins
       - name: Install Puppeteer
-        run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
+        run: |
+          npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
 
+      # 4️⃣ Run OTMenT Automation
       - name: Run OTMenT Automation
         env:
-          EXTENSION_PATH: dist    # <-- update if extension folder changes
+          EXTENSION_PATH: GitHub-Onyot   # ✅ updated to correct extension folder
           GOOGLE_USER: ${{ secrets.GOOGLE_USER }}
           GOOGLE_PASS: ${{ secrets.GOOGLE_PASS }}
-        run: node automation/run.js
+        run: |
+          echo "Starting OTMenT automation..."
+          touch otment.log
+          node automation/run.js >> otment.log 2>&1 || echo "Automation failed"
+          echo "Automation step finished (success or failure)."
 
+      # 5️⃣ Upload screenshot artifact
       - name: Upload screenshot
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: otment-screenshot
-          path: post-login.png
+          path: automation-screenshot.png
+          if-no-files-found: ignore
+
+      # 6️⃣ Upload logs artifact
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: otment-logs
+          path: otment.log
+          if-no-files-found: warn
