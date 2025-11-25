@@ -1,134 +1,54 @@
-import undetected_chromedriver as uc
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import gspread
+from google.oauth2.service_account import Credentials
+import json
 import os
 import sys
-import time
-import subprocess
 
-def launch_with_local_extension():
-    EXTENSION_PATH = os.environ.get("EXTENSION_PATH")
-    DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
-    GOOGLE_USER = os.environ.get("GOOGLE_USER")
-    GOOGLE_PASS = os.environ.get("GOOGLE_PASS")
-    CHROME_BIN = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome")
+def run_sheets_automation():
+    SERVICE_ACCOUNT_FILE = "automation/secrets/service-account.json"
+    CONFIG_FILE = "automation/secrets/config.json"
 
-    if not EXTENSION_PATH:
-        raise RuntimeError("EXTENSION_PATH environment variable is missing!")
-    if not GOOGLE_USER or not GOOGLE_PASS:
-        raise RuntimeError("GOOGLE_USER and GOOGLE_PASS environment variables are required!")
+    if not os.path.exists(SERVICE_ACCOUNT_FILE):
+        raise RuntimeError("Service account JSON file is missing!")
+    if not os.path.exists(CONFIG_FILE):
+        raise RuntimeError("Config file is missing!")
 
-    print("[OTMenT] Using local extension:", EXTENSION_PATH)
-    print("[OTMenT] Debug mode:", "ON (non‑headless)" if DEBUG else "OFF (still non‑headless)")
-    print("[OTMenT] Chrome binary:", CHROME_BIN)
+    # Load config
+    with open(CONFIG_FILE) as f:
+        cfg = json.load(f)
 
-    # Log Chrome version
-    try:
-        version = subprocess.check_output([CHROME_BIN, "--version"]).decode().strip()
-        print("[OTMenT] Chrome version:", version)
-    except Exception:
-        print("[OTMenT] Could not determine Chrome version")
+    spreadsheet_id = cfg.get("spreadsheetId")
+    sheet_name = cfg.get("sheetName")
+    detail_sheet_name = cfg.get("detailSheetName")
 
-    options = Options()
+    if not spreadsheet_id or not sheet_name:
+        raise RuntimeError("Spreadsheet ID and sheet name must be provided in config.json")
 
-    # Load extension: .crx packaged or unpacked folder
-    if EXTENSION_PATH.endswith(".crx"):
-        options.add_extension(EXTENSION_PATH)
-    else:
-        options.add_argument(f"--load-extension={EXTENSION_PATH}")
-
-    # Force non‑headless mode always
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-software-rasterizer")
-    options.add_argument("--disable-setuid-sandbox")
-
-    driver = None
-    screenshot_path = "automation-screenshot.png"
+    SCOPES = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
 
     try:
-        # Explicitly point to Chrome binary installed in CI
-        driver = uc.Chrome(
-            options=options,
-            browser_executable_path=CHROME_BIN
-        )
+        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+        client = gspread.authorize(creds)
 
-        # Navigate to Google login
-        driver.get("https://accounts.google.com/")
-        print("[OTMenT] Navigated to Google Sign‑In")
+        # Open the spreadsheet and worksheet
+        sheet = client.open_by_key(spreadsheet_id).worksheet(sheet_name)
+        records = sheet.get_all_records()
+        print("[OTMenT] Retrieved records from sheet:", sheet_name)
+        print(records)
 
-        wait = WebDriverWait(driver, 40)  # longer timeout
+        # Optionally work with detail sheet
+        if detail_sheet_name:
+            detail_sheet = client.open_by_key(spreadsheet_id).worksheet(detail_sheet_name)
+            detail_records = detail_sheet.get_all_records()
+            print("[OTMenT] Retrieved records from detail sheet:", detail_sheet_name)
+            print(detail_records)
 
-        # Enter email
-        email_input = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'input[type="email"]')))
-        driver.execute_script("arguments[0].scrollIntoView(true);", email_input)
-        email_input.send_keys(GOOGLE_USER)
-        driver.find_element(By.ID, "identifierNext").click()
-        print("[OTMenT] Entered email")
-
-        # Allow transition animation
-        time.sleep(2)
-
-        # Enter password
-        password_input = wait.until(EC.element_to_be_clickable((By.NAME, "Passwd")))
-        driver.execute_script("arguments[0].scrollIntoView(true);", password_input)
-        password_input.send_keys(GOOGLE_PASS)
-        driver.find_element(By.ID, "passwordNext").click()
-        print("[OTMenT] Entered password")
-
-        # Wait for login to complete or detect 2FA
-        try:
-            wait.until(EC.title_contains("Google"))
-            print("[OTMenT] Logged into Google account successfully")
-        except TimeoutException:
-            print("[OTMenT] Login may require additional verification (2FA or recovery).")
-
-        # Optional: navigate to target URL after login
-        target_url = "https://www.peoplesearchnow.com/address/629-west-lightwood-street_citrus-springs-fl"
-        driver.get(target_url)
-        print("[OTMenT] Navigated to target URL")
-        print("[OTMenT] Page title:", driver.title)
-
-        driver.save_screenshot(screenshot_path)
-        print(f"[OTMenT] Screenshot captured at {screenshot_path}")
-
-        # Keep browser open for inspection if DEBUG=true (skip in CI)
-        if DEBUG and os.environ.get("CI") != "true":
-            print("[OTMenT] Debug mode active — keeping browser open for manual inspection.")
-            time.sleep(60)
-
-    except TimeoutException as te:
-        print("[OTMenT] Timeout while loading page:", te)
-        try:
-            if driver:
-                driver.save_screenshot(screenshot_path)
-                print(f"[OTMenT] Timeout screenshot captured at {screenshot_path}")
-        except Exception:
-            print("[OTMenT] Could not capture screenshot on timeout.")
-        sys.exit(1)
     except Exception as e:
-        print("[OTMenT] Automation failed:", e)
-        try:
-            if driver:
-                driver.save_screenshot(screenshot_path)
-                print(f"[OTMenT] Error screenshot captured at {screenshot_path}")
-        except Exception:
-            print("[OTMenT] Could not capture screenshot on error.")
+        print("[OTMenT] Sheets automation failed:", e)
         sys.exit(1)
-    finally:
-        try:
-            if driver:
-                driver.save_screenshot(screenshot_path)
-                print(f"[OTMenT] Final screenshot captured at {screenshot_path}")
-        except Exception:
-            print("[OTMenT] Could not capture final screenshot.")
-        if driver:
-            driver.quit()
-            print("[OTMenT] Browser closed.")
 
 if __name__ == "__main__":
-    launch_with_local_extension()
+    run_sheets_automation()
