@@ -58,7 +58,16 @@ jobs:
           python automation/run.py || { echo "Automation failed"; exit 1; }
           echo "Automation completed successfully."
 
-      # 6️⃣ Cleanup
+      # 6️⃣ Upload screenshot artifact
+      - name: Upload screenshot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: automation-screenshot
+          path: automation-screenshot.png
+          if-no-files-found: ignore
+
+      # 7️⃣ Cleanup
       - name: Cleanup
         if: always()
         run: |
