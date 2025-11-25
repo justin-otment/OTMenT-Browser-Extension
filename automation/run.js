@@ -7,19 +7,22 @@ import path from "path";
 // ---------------------------------------------
 async function launchWithLocalExtension() {
   const EXTENSION_PATH = process.env.EXTENSION_PATH;
+  const FIREFOX_PATH = process.env.FIREFOX_PATH || "/usr/bin/firefox";
 
   if (!EXTENSION_PATH) {
     throw new Error("EXTENSION_PATH environment variable is missing!");
   }
 
   console.log("[OTMenT] Using local extension:", EXTENSION_PATH);
+  console.log("[OTMenT] Using Firefox binary:", FIREFOX_PATH);
 
-  // Resolve absolute path
+  // Resolve absolute path for extension folder
   const resolvedPath = path.resolve(EXTENSION_PATH);
 
   // Launch Firefox with unsigned extension support
   const browser = await puppeteer.launch({
     product: "firefox",
+    executablePath: FIREFOX_PATH,
     headless: false,
     args: [
       `--disable-extensions-except=${resolvedPath}`,
@@ -47,7 +50,7 @@ async function launchWithLocalExtension() {
   try {
     await launchWithLocalExtension();
   } catch (err) {
-    console.error("Automation failed:", err);
+    console.error("[OTMenT] Automation failed:", err);
     process.exit(1);
   }
 })();
