@@ -23,20 +23,36 @@ jobs:
         run: |
           npm install puppeteer@latest puppeteer-extra puppeteer-extra-plugin-stealth
 
-      # 4️⃣ Run OTMenT Automation
+      # 4️⃣ Debug folder structure (IMPORTANT)
+      - name: Debug repo folder
+        run: |
+          echo "Repo Structure:"
+          ls -R .
+
+      # 5️⃣ Run OTMenT Automation
       - name: Run OTMenT Automation
         env:
-          EXTENSION_PATH: GitHub-Onyot   # ✅ extension folder
+          EXTENSION_PATH: GitHub-Onyot 
           GOOGLE_USER: ${{ secrets.GOOGLE_USER }}
           GOOGLE_PASS: ${{ secrets.GOOGLE_PASS }}
         run: |
           echo "Starting OTMenT automation..."
           touch otment.log
+
           # Run automation with logging redirected to file
           node automation/run.js >> otment.log 2>&1 || echo "Automation failed"
+
           echo "Automation step finished (success or failure)."
 
-      # 5️⃣ Upload screenshots (success + failure attempts)
+      # 6️⃣ Show automation log in console
+      - name: Show automation log
+        if: always()
+        run: |
+          echo "------ OTMENT LOG ------"
+          cat otment.log || echo "No log file"
+          echo "------------------------"
+
+      # 7️⃣ Upload screenshots (success + failure)
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
@@ -48,7 +64,7 @@ jobs:
             automation-failure-*.png
           if-no-files-found: ignore
 
-      # 6️⃣ Upload logs artifact
+      # 8️⃣ Upload logs
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
