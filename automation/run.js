@@ -8,115 +8,132 @@ const MAX_ATTEMPTS = 5;
 const WAIT_SECONDS = 10;
 
 async function findExtensionId(browser) {
-  // implement your extension ID detection logic here
-  // placeholder: return first extension id found
   const targets = await browser.targets();
   const extensionTarget = targets.find(t => t.type() === 'background_page');
-  if (extensionTarget) {
-    const url = extensionTarget.url();
-    const match = url.match(/chrome-extension:\/\/([a-z]+)/);
-    return match ? match[1] : null;
-  }
-  return null;
+
+  if (!extensionTarget) return null;
+
+  const url = extensionTarget.url();
+  const match = url.match(/chrome-extension:\/\/([a-z]+)/);
+
+  return match ? match[1] : null;
 }
 
 async function launchWithExtension() {
   let success = false;
+  const EXT_PATH = process.env.EXTENSION_PATH || 'GitHub-Onyot';
+
+  console.log("[OTMenT] Using extension path:", EXT_PATH);
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS && !success; attempt++) {
     console.log(`[OTMenT] Attempt ${attempt}/${MAX_ATTEMPTS}`);
 
-    const browser = await puppeteer.launch({
-      headless: false, // 👈 non-headless for Cloudflare bypass
-      args: [
-        `--disable-blink-features=AutomationControlled`,
-        `--load-extension=${process.env.EXTENSION_PATH || 'GitHub-Onyot'}`,
-        `--no-sandbox`,
-        `--disable-setuid-sandbox`
-      ]
-    });
+    let browser;
+
+    try {
+      browser = await puppeteer.launch({
+        headless: "new",  // IMPORTANT FOR GITHUB ACTIONS
+        args: [
+          '--disable-blink-features=AutomationControlled',
+          `--load-extension=${EXT_PATH}`,
+          '--disable-gpu',
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+        ]
+      });
+    } catch (err) {
+      console.error("[OTMenT] Browser launch failed:", err);
+      continue;
+    }
 
     const page = await browser.newPage();
-    await page.goto('https://target-site.com', { waitUntil: 'domcontentloaded' });
 
-    // Detect Cloudflare challenge
-    const title = await page.title();
-    if (title.includes("Just a moment") || title.includes("Checking your browser")) {
-      console.warn("[OTMenT] Cloudflare challenge detected. Waiting...");
-      await page.waitForTimeout(WAIT_SECONDS * 1000);
+    try {
+      await page.goto('https://target-site.com', { waitUntil: 'domcontentloaded' });
 
-      const newTitle = await page.title();
-      if (newTitle.includes("Just a moment") || newTitle.includes("Checking your browser")) {
-        console.error(`[OTMenT] Challenge not bypassed on attempt ${attempt}`);
-        await page.screenshot({ path: `automation-failure-${attempt}.png` });
-        await browser.close();
-        continue;
-      }
-    }
+      // Cloudflare detection
+      const title = await page.title();
+      if (title.includes("Just a moment") || title.includes("Checking your browser")) {
+        console.warn("[OTMenT] Cloudflare challenge detected. Waiting...");
+        await page.waitForTimeout(WAIT_SECONDS * 1000);
 
-    // Extension handling
-    const extId = await findExtensionId(browser);
-    if (!extId) {
-      console.warn('[OTMenT] Could not detect extension id automatically.');
-    } else {
-      console.log('[OTMenT] Detected extension id:', extId);
-
-      const candidates = [
-        '/popup.html',
-        '/index.html',
-        '/popup/popup.html',
-        '/_generated_background_page.html'
-      ];
-      let opened = false;
-      for (const c of candidates) {
-        const url = `chrome-extension://${extId}${c}`;
-        try {
-          const extPage = await browser.newPage();
-          await extPage.goto(url, { waitUntil: 'networkidle2', timeout: 10000 });
-          console.log('[OTMenT] Opened extension page:', url);
-
-          try {
-            await extPage.waitForSelector('#start-btn, button.start, .start-btn', { timeout: 2000 });
-            await extPage.click('#start-btn, button.start, .start-btn');
-            console.log('[OTMenT] Clicked start button in extension popup (if present)');
-          } catch {
-            // no start button — fine
-          }
-          opened = true;
-          break;
-        } catch {
-          console.log('[OTMenT] candidate not found:', url);
+        const newTitle = await page.title();
+        if (newTitle.includes("Just a moment") || newTitle.includes("Checking your browser")) {
+          console.error(`[OTMenT] Challenge not bypassed on attempt ${attempt}`);
+          await page.screenshot({ path: `automation-failure-${attempt}.png` });
+          await browser.close();
+          continue;
         }
       }
-      if (!opened) console.log('[OTMenT] Could not open a popup page candidate — extension may be background-only');
-    }
 
-    // Screenshots
-    try {
-      await page.screenshot({ path: 'post-login.png' });
-      console.log('[OTMenT] Saved post-login.png');
-    } catch (e) {
-      console.warn('[OTMenT] Screenshot failed:', e.message);
-    }
+      // Extension ID discovery
+      const extId = await findExtensionId(browser);
+      if (!extId) {
+        console.warn("[OTMenT] Extension ID not found.");
+      } else {
+        console.log("[OTMenT] Detected extension:", extId);
 
-    try {
+        const pages = [
+          '/popup.html',
+          '/index.html',
+          '/popup/popup.html',
+          '/_generated_background_page.html'
+        ];
+
+        let opened = false;
+
+        for (const p of pages) {
+          const url = `chrome-extension://${extId}${p}`;
+          try {
+            const extPage = await browser.newPage();
+            await extPage.goto(url, { waitUntil: 'networkidle2', timeout: 5000 });
+            console.log("[OTMenT] Opened extension page:", url);
+
+            try {
+              await extPage.waitForSelector('#start-btn, button.start, .start-btn', { timeout: 2000 });
+              await extPage.click('#start-btn, button.start, .start-btn');
+              console.log("[OTMenT] Clicked start button");
+            } catch {}
+
+            opened = true;
+            break;
+          } catch {
+            console.log("[OTMenT] Page not found:", url);
+          }
+        }
+
+        if (!opened)
+          console.log("[OTMenT] No extension popup found. Extension may be background-only.");
+      }
+
+      // Save screenshots
+      try {
+        await page.screenshot({ path: 'post-login.png' });
+        console.log("[OTMenT] Saved post-login.png");
+      } catch (err) {
+        console.warn("[OTMenT] Could not save post-login screenshot:", err.message);
+      }
+
       await page.screenshot({ path: 'automation-screenshot.png' });
-    } catch {}
 
-    console.log('[OTMenT] Browser will remain open for extension to run.');
-    success = true;
+      console.log("[OTMenT] Browser active for extension...");
 
-    // Keep process alive so extension background page can run
-    await new Promise(() => {});
+      success = true;
+      await new Promise(() => {}); // keep process alive
+
+    } catch (err) {
+      console.error("[OTMenT] Automation failed:", err);
+    }
   }
 
   if (!success) {
-    console.error("[OTMenT] All attempts failed. Cloudflare challenge not bypassed.");
+    console.error("[OTMenT] All attempts failed.");
     process.exit(1);
   }
 }
 
 launchWithExtension().catch(err => {
-  console.error('[OTMenT] Automation failed:', err);
+  console.error("[OTMenT] Fatal error:", err);
   process.exit(1);
 });
