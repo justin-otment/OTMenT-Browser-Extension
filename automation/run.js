@@ -43,13 +43,14 @@ async function launchWithExtension() {
           '--disable-blink-features=AutomationControlled',
           `--disable-extensions-except=${EXT_PATH}`,
           `--load-extension=${EXT_PATH}`,
-          `--user-data-dir=${CHROME_PROFILE}`,
+          `--user-data-dir=${path.join(EXT_PATH, 'OTMenT_Auto_Profile')}`, // UPDATED PATH
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-gpu',
           '--disable-dev-shm-usage',
         ]
       });
+
     } catch (err) {
       console.error("[OTMenT] Browser launch failed:", err);
       continue;
