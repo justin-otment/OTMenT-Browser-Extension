@@ -8,11 +8,11 @@ jobs:
     runs-on: [self-hosted, windows]
 
     steps:
-      # 1️⃣ Check out the repository
+      # 1️⃣ Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Setup Node.js 20
+      # 2️⃣ Setup Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -25,28 +25,23 @@ jobs:
           npm install puppeteer-extra puppeteer-extra-plugin-stealth
           npm install puppeteer --force
 
-      # 4️⃣ Debug folder structure
-      - name: Debug structure
+      # 4️⃣ Debug structure
+      - name: Debug folder structure
         run: |
           Write-Host "Current directory:"
           Get-ChildItem -Recurse
 
-      # 5️⃣ Run automation using local Chrome + extension + profile
+      # 5️⃣ Run automation
       - name: Run OTMenT Automation
         env:
           GOOGLE_USER: ${{ secrets.GOOGLE_USER }}
           GOOGLE_PASS: ${{ secrets.GOOGLE_PASS }}
 
-          # Path to Chrome Profile on Windows
-          CHROME_PROFILE: "C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\User Data\\Default"
-
-          # Path to your extension on your VPS filesystem
+          # Path to extension folder
           EXTENSION_PATH: "C:\\Users\\Administrator\\Desktop\\OTMenT-3"
 
         run: |
           echo "Starting automation..."
-          
-          # Run your Node automation script and log output
           node automation/run.js 2>&1 | Tee-Object otment.log
 
       # 6️⃣ Upload logs
