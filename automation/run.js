@@ -10,7 +10,7 @@ const WAIT_SECONDS = 10;
 
 // Get paths from environment variables
 const EXT_PATH = process.env.EXTENSION_PATH || 'C:\\Users\\Administrator\\Desktop\\OTMenT-3';
-const CHROME_PROFILE = process.env.CHROME_PROFILE || 'C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\User Data\\Default';
+const CHROME_PROFILE = process.env.CHROME_PROFILE || 'C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\User Data\\Work';
 
 async function findExtensionId(browser) {
   const targets = await browser.targets();
