@@ -18,10 +18,12 @@ jobs:
         with:
           node-version: "20"
 
-      # 3️⃣ Install dependencies (local to VPS)
+      # 3️⃣ Install dependencies
       - name: Install dependencies
         run: |
           npm install
+          npm install puppeteer-extra puppeteer-extra-plugin-stealth
+          npm install puppeteer --force
 
       # 4️⃣ Debug folder structure
       - name: Debug structure
@@ -39,15 +41,15 @@ jobs:
           CHROME_PROFILE: "C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\User Data\\Default"
 
           # Path to your extension on your VPS filesystem
-          EXTENSION_PATH: "C:\\Users\\Administrator\\Desktop\\OTMenT-Extension"
+          EXTENSION_PATH: "C:\\Users\\Administrator\\Desktop\\OTMenT-3"
 
         run: |
           echo "Starting automation..."
           
-          # Run your Node automation script
+          # Run your Node automation script and log output
           node automation/run.js 2>&1 | Tee-Object otment.log
 
-      # 6️⃣ Upload logs (optional)
+      # 6️⃣ Upload logs
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
