@@ -1,15 +1,20 @@
 // automation/run.js
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const path = require('path');
 
 puppeteer.use(StealthPlugin());
 
 const MAX_ATTEMPTS = 5;
 const WAIT_SECONDS = 10;
 
+// Get paths from environment variables
+const EXT_PATH = process.env.EXTENSION_PATH || 'C:\\Users\\Administrator\\Desktop\\OTMenT-3';
+const CHROME_PROFILE = process.env.CHROME_PROFILE || 'C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\User Data\\Default';
+
 async function findExtensionId(browser) {
   const targets = await browser.targets();
-  const extensionTarget = targets.find(t => t.type() === 'background_page');
+  const extensionTarget = targets.find(t => t.type() === 'background_page' || t.type() === 'service_worker');
 
   if (!extensionTarget) return null;
 
@@ -21,24 +26,27 @@ async function findExtensionId(browser) {
 
 async function launchWithExtension() {
   let success = false;
-  const EXT_PATH = process.env.EXTENSION_PATH || 'GitHub-Onyot';
 
   console.log("[OTMenT] Using extension path:", EXT_PATH);
+  console.log("[OTMenT] Using Chrome profile:", CHROME_PROFILE);
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS && !success; attempt++) {
     console.log(`[OTMenT] Attempt ${attempt}/${MAX_ATTEMPTS}`);
 
     let browser;
-
     try {
       browser = await puppeteer.launch({
-        headless: "new",  // IMPORTANT FOR GITHUB ACTIONS
+        headless: false, // must be false to load extensions on Windows
+        defaultViewport: null,
+        executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe",
         args: [
           '--disable-blink-features=AutomationControlled',
+          `--disable-extensions-except=${EXT_PATH}`,
           `--load-extension=${EXT_PATH}`,
-          '--disable-gpu',
+          `--user-data-dir=${CHROME_PROFILE}`,
           '--no-sandbox',
           '--disable-setuid-sandbox',
+          '--disable-gpu',
           '--disable-dev-shm-usage',
         ]
       });
@@ -82,7 +90,6 @@ async function launchWithExtension() {
         ];
 
         let opened = false;
-
         for (const p of pages) {
           const url = `chrome-extension://${extId}${p}`;
           try {
@@ -116,7 +123,6 @@ async function launchWithExtension() {
       }
 
       await page.screenshot({ path: 'automation-screenshot.png' });
-
       console.log("[OTMenT] Browser active for extension...");
 
       success = true;
