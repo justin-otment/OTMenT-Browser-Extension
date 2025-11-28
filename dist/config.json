@@ -2,10 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "_id": "Address-Search_People-Links",
   "baseUrl": "https://www.peoplesearchnow.com",
-  "spreadsheetId": "1rHU_8_9toBx02wsOUTpIbwDOn_0MmLUNTjVmxTPyDhs",
-  "sheetName": "Reprocessing",
-  "urlRange": "Reprocessing!S2:S",
-  "startRow": 2,
+
+  "spreadsheetId": "{{config_spreadsheetId}}",
+  "sheetName": "{{config_sheetName}}",
+  "urlRange": "{{config_urlRange}}",
+  "startRow": {{config_startRow}},
+
   "fastMode": true,
   "maxPairs": 3,
   "matchThreshold": 0.30,
@@ -82,7 +84,7 @@
       "selector": "a.btn",
       "extractAttribute": "href",
       "multiple": true
-    }      
+    }
   ],
   "detailSelectors": [
     {
