@@ -7,51 +7,61 @@ document.addEventListener("DOMContentLoaded", () => {
   const toggleBtn = document.getElementById('toggle');
   const statusEl = document.getElementById('status');
 
+  const sheetIdInput = document.getElementById('sheetId');
+  const sheetNameInput = document.getElementById('sheetName');
+  const urlRangeInput = document.getElementById('urlRange');
+  const startRowInput = document.getElementById('startRow');
+
   if (!apiKeyInput || !apiModeSelect || !saveBtn || !resetBtn || !statusEl) {
     console.error("❌ Missing DOM elements in options.html");
     return;
   }
 
-  const MIN_KEY_LENGTH = 32; // 2Captcha keys are 32 chars
+  const MIN_KEY_LENGTH = 32;
   saveBtn.disabled = true;
 
-  // Promise helpers for storage
-  const storageGet = (keys) =>
-    new Promise((resolve) => chrome.storage.local.get(keys, resolve));
-  const storageSet = (obj) =>
-    new Promise((resolve, reject) =>
-      chrome.storage.local.set(obj, () => {
-        if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
-        else resolve();
-      })
-    );
+  const storageGet = (keys) => new Promise(resolve => chrome.storage.local.get(keys, resolve));
+  const storageSet = (obj) => new Promise((resolve, reject) => chrome.storage.local.set(obj, () => {
+    if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+    else resolve();
+  }));
 
-  // Load saved settings + enabled flag
-  chrome.storage.local.get(['solver_api_key', 'solver_api_mode', 'extension_enabled'], (res) => {
-    const { solver_api_key, solver_api_mode, extension_enabled } = res;
+  chrome.storage.local.get([
+    'solver_api_key', 'solver_api_mode', 'extension_enabled',
+    'config_spreadsheetId', 'config_sheetName', 'config_urlRange', 'config_startRow'
+  ], (res) => {
+    const {
+      solver_api_key, solver_api_mode, extension_enabled,
+      config_spreadsheetId, config_sheetName, config_urlRange, config_startRow
+    } = res;
+
     if (solver_api_key) {
       apiKeyInput.value = solver_api_key;
-      if (solver_api_key.length >= MIN_KEY_LENGTH) {
-        saveBtn.disabled = false;
-      }
+      if (solver_api_key.length >= MIN_KEY_LENGTH) saveBtn.disabled = false;
     }
     apiModeSelect.value = solver_api_mode || 'json';
 
-    // Initialize toggle button label (default ON if undefined)
+    sheetIdInput.value = config_spreadsheetId || '';
+    sheetNameInput.value = config_sheetName || '';
+    urlRangeInput.value = config_urlRange || '';
+    startRowInput.value = config_startRow || 2;
+
     const enabled = extension_enabled !== false;
     updateToggleUI(enabled);
   });
 
-  // Enable save when typing
   apiKeyInput.addEventListener('input', () => {
     saveBtn.disabled = apiKeyInput.value.trim().length < MIN_KEY_LENGTH;
     clearStatus();
   });
 
-  // Save handler
   saveBtn.addEventListener('click', () => {
     const key = apiKeyInput.value.trim();
     const mode = apiModeSelect.value;
+    const spreadsheetId = sheetIdInput.value.trim();
+    const sheetName = sheetNameInput.value.trim();
+    const urlRange = urlRangeInput.value.trim();
+    const startRow = Number(startRowInput.value.trim()) || 2;
 
     if (key.length !== MIN_KEY_LENGTH) {
       showStatus('⚠️ API key must be 32 characters', 'orange');
@@ -61,7 +71,14 @@ document.addEventListener("DOMContentLoaded", () => {
     saveBtn.disabled = true;
     showStatus('💾 Saving…');
 
-    chrome.storage.local.set({ solver_api_key: key, solver_api_mode: mode }, () => {
+    chrome.storage.local.set({
+      solver_api_key: key,
+      solver_api_mode: mode,
+      config_spreadsheetId: spreadsheetId,
+      config_sheetName: sheetName,
+      config_urlRange: urlRange,
+      config_startRow: startRow
+    }, () => {
       if (chrome.runtime.lastError) {
         console.error('Error saving:', chrome.runtime.lastError);
         showStatus('❌ Failed to save settings', 'red');
@@ -71,27 +88,20 @@ document.addEventListener("DOMContentLoaded", () => {
 
       showStatus('✅ Saved. Testing API key…');
 
-      // Validate via getBalance
       fetch(`https://2captcha.com/res.php?key=${encodeURIComponent(key)}&action=getbalance&json=1`)
         .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
         .then(json => {
-          if (json.status === 1) {
-            showStatus(`✅ Valid key! Balance: $${json.request}`, 'green');
-          } else {
-            showStatus(`⚠️ Saved but validation failed: ${json.request}`, 'orange');
-          }
+          if (json.status === 1) showStatus(`✅ Valid key! Balance: $${json.request}`, 'green');
+          else showStatus(`⚠️ Saved but validation failed: ${json.request}`, 'orange');
         })
         .catch(err => {
           console.error('Error testing key:', err);
           showStatus(`❌ Error testing key: ${err.message}`, 'red');
         })
-        .finally(() => {
-          saveBtn.disabled = false;
-        });
+        .finally(() => { saveBtn.disabled = false; });
     });
   });
 
-  // Reset handler
   resetBtn.addEventListener('click', () => {
     if (confirm("Are you sure you want to reset the scraper?")) {
       chrome.runtime.sendMessage({ action: "resetScraper" }, (resp) => {
@@ -106,47 +116,35 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Reload Extension handler
-  if (updateBtn) {
-    updateBtn.addEventListener('click', () => {
-      if (confirm("Reload the extension now?")) {
-        showStatus("🔄 Reloading extension…", "blue");
-        chrome.runtime.reload();
-      }
-    });
-  }
+  if (updateBtn) updateBtn.addEventListener('click', () => {
+    if (confirm("Reload the extension now?")) {
+      showStatus("🔄 Reloading extension…", "blue");
+      chrome.runtime.reload();
+    }
+  });
 
-  // Toggle On/Off handler (using promisified storage)
-  if (toggleBtn) {
-    toggleBtn.addEventListener('click', async () => {
-      try {
-        const { extension_enabled } = await storageGet('extension_enabled');
-        const current = extension_enabled !== false; // default ON if undefined
-        const newState = !current;
-        await storageSet({ extension_enabled: newState });
-        updateToggleUI(newState);
-        showStatus(newState ? "✅ Extension ON" : "⏻ Extension OFF", newState ? "green" : "red");
-      } catch (err) {
-        console.error("Toggle error:", err);
-        showStatus("❌ Failed to toggle ON/OFF", "red");
-      }
-    });
-  }
+  if (toggleBtn) toggleBtn.addEventListener('click', async () => {
+    try {
+      const { extension_enabled } = await storageGet('extension_enabled');
+      const newState = !(extension_enabled !== false);
+      await storageSet({ extension_enabled: newState });
+      updateToggleUI(newState);
+      showStatus(newState ? "✅ Extension ON" : "⏻ Extension OFF", newState ? "green" : "red");
+    } catch (err) {
+      console.error("Toggle error:", err);
+      showStatus("❌ Failed to toggle ON/OFF", "red");
+    }
+  });
 
   function updateToggleUI(state) {
-    if (toggleBtn) {
-      toggleBtn.textContent = state ? "⏻ Turn OFF" : "⏻ Turn ON";
-    }
+    if (toggleBtn) toggleBtn.textContent = state ? "⏻ Turn OFF" : "⏻ Turn ON";
   }
 
   function showStatus(msg, color) {
     statusEl.textContent = msg;
     statusEl.style.color = color || '';
     statusEl.style.opacity = '1';
-    // Fade out after 5 seconds
-    setTimeout(() => {
-      statusEl.style.opacity = '0';
-    }, 5000);
+    setTimeout(() => { statusEl.style.opacity = '0'; }, 5000);
   }
 
   function clearStatus() {
