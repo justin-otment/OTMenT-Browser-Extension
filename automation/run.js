@@ -10,7 +10,7 @@ const WAIT_SECONDS = 10;
 
 // Get paths from environment variables
 const EXT_PATH = process.env.EXTENSION_PATH || 'C:\\Users\\Administrator\\Desktop\\OTMenT-3';
-const CHROME_PROFILE = process.env.CHROME_PROFILE || 'C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\User Data\\Work';
+const CHROME_PROFILE = process.env.CHROME_PROFILE || 'C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\User Data\\Default';
 
 async function findExtensionId(browser) {
   const targets = await browser.targets();
@@ -59,7 +59,7 @@ async function launchWithExtension() {
     const page = await browser.newPage();
 
     try {
-      await page.goto('https://target-site.com', { waitUntil: 'domcontentloaded' });
+      await page.goto('https://peoplesearchnow.com', { waitUntil: 'domcontentloaded' });
 
       // Cloudflare detection
       const title = await page.title();
@@ -85,7 +85,7 @@ async function launchWithExtension() {
 
         const pages = [
           '/popup.html',
-          '/index.html',
+          '/options.html',
           '/popup/popup.html',
           '/_generated_background_page.html'
         ];
