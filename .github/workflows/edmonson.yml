@@ -1,139 +1,41 @@
-// edmonson-beacon-scraper.js
+name: Beacon Scraper – Edmonson County
 
-const axios = require('axios');
-const { CookieJar } = require('tough-cookie');
-const { wrapper } = require('axios-cookiejar-support');
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'  # Runs every Monday at 6 AM UTC
 
-const BASE_URL = 'https://beacon.schneidercorp.com/?site=EdmonsonCountyKY';
+jobs:
+  scrape-edmonson:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
-// TODO: fill these from DevTools
-const SEARCH_URL = 'https://beacon.schneidercorp.com/XXXX/Search';      // parcel search
-const DETAILS_URL = 'https://beacon.schneidercorp.com/XXXX/Details';    // parcel details
-const GEOM_URL = 'https://beacon.schneidercorp.com/XXXX/Geometry';      // parcel geometry
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-async function createSession() {
-  const jar = new CookieJar();
-  const client = wrapper(axios.create({ jar, withCredentials: true }));
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-  // Initial GET to set cookies and grab any tokens if needed
-  const resp = await client.get(BASE_URL);
-  const html = resp.data;
+      - name: Install dependencies
+        run: npm ci
 
-  // If there is an anti-forgery token in a hidden input, extract it here
-  // Example (adjust regex based on actual markup):
-  const tokenMatch = html.match(/name="__RequestVerificationToken" value="([^"]+)"/);
-  const csrfToken = tokenMatch ? tokenMatch[1] : null;
+      - name: Run Beacon scraper
+        run: node edmonson-beacon-scraper.js
 
-  return { client, csrfToken };
-}
+      - name: Upload scraped output
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edmonson-parcels
+          path: output/edmonson-parcels.json
 
-function buildWildcardTerms() {
-  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
-  const digits = '0123456789'.split('');
-  return [...letters, ...digits].map(ch => ch + '*');
-}
-
-async function searchParcels(client, csrfToken, term) {
-  // Inspect DevTools to match the real method and payload
-  const payload = {
-    // Example shape – replace with the real one
-    searchText: term,
-    searchType: 'Owner', // or 'ParcelID', 'Address' etc.
-  };
-
-  const headers = {};
-  if (csrfToken) {
-    headers['RequestVerificationToken'] = csrfToken; // or correct header name
-  }
-
-  const { data } = await client.post(SEARCH_URL, payload, { headers });
-
-  // Adjust this mapping based on actual response structure
-  return (data.results || data || []).map(item => ({
-    parcelId: item.parcelId || item.ParcelID || item.PIN || null,
-    owner: item.owner || item.OwnerName || null,
-    summary: item,
-  }));
-}
-
-async function fetchParcelDetails(client, csrfToken, parcelId) {
-  const headers = {};
-  if (csrfToken) {
-    headers['RequestVerificationToken'] = csrfToken;
-  }
-
-  // Might be POST or GET; adjust based on DevTools
-  const { data } = await client.post(
-    DETAILS_URL,
-    { parcelId },          // or whatever key is used (e.g., { id: parcelId })
-    { headers }
-  );
-
-  return data;
-}
-
-async function fetchParcelGeometry(client, csrfToken, parcelId) {
-  const headers = {};
-  if (csrfToken) {
-    headers['RequestVerificationToken'] = csrfToken;
-  }
-
-  const { data } = await client.post(
-    GEOM_URL,
-    { parcelId },          // adjust to real payload
-    { headers }
-  );
-
-  // Expect geometry as coordinates or ESRI JSON; just return raw for now
-  return data;
-}
-
-async function scrapeAllParcels() {
-  const { client, csrfToken } = await createSession();
-  const terms = buildWildcardTerms();
-
-  const parcelMap = new Map(); // parcelId -> { attributes, geometry }
-
-  for (const term of terms) {
-    console.log(`Searching with term: ${term}`);
-    const partials = await searchParcels(client, csrfToken, term);
-
-    for (const p of partials) {
-      if (!p.parcelId || parcelMap.has(p.parcelId)) continue;
-
-      try {
-        const [details, geometry] = await Promise.all([
-          fetchParcelDetails(client, csrfToken, p.parcelId),
-          fetchParcelGeometry(client, csrfToken, p.parcelId),
-        ]);
-
-        parcelMap.set(p.parcelId, {
-          parcelId: p.parcelId,
-          owner: p.owner,
-          // Adjust according to the structure you see
-          mailingAddress: details.mailingAddress || null,
-          propertyAddress: details.propertyAddress || null,
-          acreage: details.acres || details.acreage || null,
-          assessedValue: details.assessedValue || null,
-          landUse: details.landUse || null,
-          attributes: details,
-          geometry, // raw geometry payload
-        });
-      } catch (err) {
-        console.warn(`Failed parcel ${p.parcelId}:`, err.message);
-      }
-    }
-  }
-
-  return Array.from(parcelMap.values());
-}
-
-(async () => {
-  try {
-    const parcels = await scrapeAllParcels();
-    console.log(`Total unique parcels: ${parcels.length}`);
-    console.log(JSON.stringify(parcels, null, 2));
-  } catch (err) {
-    console.error('Scrape failed:', err);
-  }
-})();
+      - name: Fail if output missing
+        if: success()
+        run: |
+          if [ ! -f output/edmonson-parcels.json ]; then
+            echo "Scraper did not produce output"
+            exit 1
+          fi
