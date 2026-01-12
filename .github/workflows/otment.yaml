@@ -1,4 +1,4 @@
-name: OTMenT Browser Automation (Self-Hosted)
+name: OTMenT OCR Automation (Self-Hosted)
 
 on:
   workflow_dispatch:
