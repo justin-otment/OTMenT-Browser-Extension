@@ -1,0 +1,40 @@
+name: Beacon Scraper – Edmonson County
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'  # Every Monday at 6 AM UTC
+
+jobs:
+  scrape-edmonson:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run Beacon scraper
+        run: node edmonson-beacon-scraper.js
+
+      - name: Verify output exists
+        run: |
+          if [ ! -f output/edmonson-parcels.json ]; then
+            echo "❌ Scraper did not produce output"
+            exit 1
+          fi
+
+      - name: Upload scraped output
+        uses: actions/upload-artifact@v4
+        with:
+          name: edmonson-parcels
+          path: output/edmonson-parcels.json
