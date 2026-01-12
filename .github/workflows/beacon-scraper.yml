@@ -23,7 +23,7 @@ jobs:
         run: npm install
 
       - name: Run Beacon scraper
-        run: node edmonson_test1.js
+        run: node edmonson_test1.cjs
 
       - name: Verify output exists
         run: |
