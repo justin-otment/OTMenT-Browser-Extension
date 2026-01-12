@@ -1,0 +1,46 @@
+on:
+  workflow_dispatch:
+    inputs:
+      pdf_file:
+        description: 'PDF file to OCR'
+        required: true
+        default: 'sample.pdf'
+
+jobs:
+  ocr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr imagemagick poppler-utils ghostscript
+
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: Run OCR on file
+        run: |
+          FILE="${{ github.event.inputs.pdf_file }}"
+          if [ ! -f "$FILE" ]; then
+            echo "❌ File '$FILE' does not exist!"
+            exit 1
+          fi
+          echo "📄 Running OCR on $FILE..."
+          node ocr_tesseract.js "$FILE"
+
+      - name: List OCR output
+        run: ls -lh ocr_output/
+
+      - name: Upload OCR results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-output
+          path: ocr_output/
