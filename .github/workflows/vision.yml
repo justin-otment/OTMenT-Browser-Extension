@@ -1,3 +1,5 @@
+name: Edmonson Docket Searcher
+
 on:
   workflow_dispatch:
     inputs:
